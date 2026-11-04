@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lovechat-coach"
+version = "0.2.0"
+description = "LoveChat Coach — a local-first WeChat dating coach based on OpenDate skills."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Sumit Aich" }]
+keywords = [
+    "ai",
+    "agent",
+    "agent-skills",
+    "dating",
+    "llm",
+    "litellm",
+    "persona",
+    "tinder",
+    "chatbot",
+    "openai",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Topic :: Communications :: Chat",
+    "License :: OSI Approved :: MIT License",
+]
+
+# Pinned to compatible lower bounds resolved with pip at build time.
+dependencies = [
+    "litellm>=1.87.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.0",
+    "pydantic-settings>=2.14.0",
+    "pyyaml>=6.0.2",
+    "rich>=15.0.0",
+    "typer>=0.25.0",
+]
+
+[project.optional-dependencies]
+desktop = [
+    "Pillow>=10.0",
+    "psutil>=5.9",
+    "pywin32>=306; sys_platform == 'win32'",
+]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.0.0",
+    "ruff>=0.6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ray404butworks/lovechat-coach"
+Repository = "https://github.com/ray404butworks/lovechat-coach"
+Documentation = "https://github.com/ray404butworks/lovechat-coach#readme"
+Issues = "https://github.com/ray404butworks/lovechat-coach/issues"
+
+[project.scripts]
+opendate = "opendate.cli:main_entry"
+
+[project.gui-scripts]
+lovechat-coach = "opendate.wechat_gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+opendate = ["skills/registry/*/SKILL.md", "py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+# Pin the conventional Ruff checks so user/global and future defaults do not
+# change this project's existing lint contract.
+select = ["E4", "E7", "E9", "F"]

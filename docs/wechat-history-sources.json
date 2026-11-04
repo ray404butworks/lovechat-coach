@@ -1,0 +1,25 @@
+{
+  "skill": {
+    "repository": "https://github.com/15628925702/chatlog-keeper-skill",
+    "installed_folder": "wechat-chatlog",
+    "license": "MIT",
+    "local_adaptation": "GUI-first SKILL.md; upstream entrypoint preserved in references/upstream-skill.md"
+  },
+  "reader": {
+    "repository": "https://github.com/labazhou2024/chatlog-keeper",
+    "version": "v0.3.5",
+    "binary_sha256": "11cc1b6916c265ffb5621a05e8909f39aa4f47222101444e03c02c9bbf00246c",
+    "source_archive_sha256": "640135e4ffaf5ab386dd28c5d73e9d321764143d0577954ccc5aa1023457ce32",
+    "original_active_key_sha256": "ecc632189bb70965a07af7f5a2076ac6e162dcdaf634fe05cbb545eecfa89ff3",
+    "patched_active_key_sha256": "e0f484f7f55b7d581f26428d6df13c87302f7d5d52da39329d1ba0cfacbc4558",
+    "patch": "scripts/patch_chatlog_bootstrap.py",
+    "patch_reason": "PowerShell array splatting binds -DbPath as a positional string. Use an allowlisted named-parameter hashtable instead.",
+    "preserved_guards": ["RequireClosedClient", "Tencent Authenticode validation", "script digest validation", "database HMAC validation", "private recovery lifecycle and cleanup"],
+    "license": "MIT"
+  },
+  "evaluated_alternative": {
+    "repository": "https://github.com/littlecodersh/ItChat",
+    "decision": "Not connected: depends on web login; official API exposes live synchronization rather than complete historical database reading.",
+    "sources": ["https://github.com/littlecodersh/ItChat/blob/master/docs/api.md", "https://github.com/littlecodersh/ItChat/blob/master/docs/intro/login.md"]
+  }
+}

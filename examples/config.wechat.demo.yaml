@@ -1,0 +1,16 @@
+# All identities and messages in this demo are synthetic. No desktop or network.
+source: wechat
+auto_send: false
+data_dir: data/wechat-demo
+max_screen_per_cycle: 0
+max_actions_per_cycle: 1
+preferences:
+  voice: 自然、简短、真诚，像日常微信聊天，不油腻，不编造自己的经历
+persona:
+  profile_path: data/wechat-demo/persona.json
+  social_posts: []
+  chat_history: []
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  fallbacks: []

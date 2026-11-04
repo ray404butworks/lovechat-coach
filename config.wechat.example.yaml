@@ -1,0 +1,43 @@
+# Copy to config.wechat.yaml; fill the three blank identity fields yourself.
+# Codex mode reuses a local ChatGPT sign-in and does not require .env keys.
+source: wechat
+auto_send: false
+data_dir: data/wechat
+max_screen_per_cycle: 0
+max_actions_per_cycle: 1
+wechat:
+  allowed_contacts: []  # Exact, unique friend remarks, e.g. ["YOUR_FRIEND_REMARK"]
+  contact: ""          # One allowlisted friend for this run
+  my_name: ""          # Your own display name in this chat, not an invented alias
+  pyweixin_scripts: "" # Optional advanced UIA adapter; TXT / OCR do not require it
+  history_data_root: "" # Optional: actual xwechat_files folder for the desktop history reader
+  history_authorization_root: "" # Optional: exact current-account folder when multiple accounts exist
+  history_limit: 12     # Bounded context; may select/scroll within this one chat
+  allow_llm_upload: false # Set true only after reviewing docs/wechat-zh.md data flow
+preferences:
+  voice: 自然、简短、真诚，先回应对方说的事，不油腻，不编造经历或承诺
+persona:
+  social_posts: []
+  chat_history: []
+  my_names: []
+  profile_path: data/wechat/persona.json
+llm:
+  provider: codex
+  model: null
+  timeout: 120
+  max_retries: 1
+  temperature: 0.7
+  max_tokens: 300
+  fallbacks: []
+safety:
+  require_consent_checks: true
+  allow_explicit: false
+  backoff_on_disinterest: true
+  refuse_minors: true
+  refuse_on_discomfort: true
+  max_followups_without_reply: 0
+pacing:
+  cooldown_hours: 8
+  reengage_after_days: 3
+  max_daily_actions: 25
+  never_double_text: true

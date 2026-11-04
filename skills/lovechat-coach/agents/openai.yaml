@@ -1,0 +1,4 @@
+interface:
+  display_name: "恋聊教练"
+  short_description: "逐步配置微信聊天对象、模型、人设与历史记忆，生成自然且需人工审阅的约会回复草稿"
+  default_prompt: "使用 $lovechat-coach 引导我配置模型、微信聊天对象、历史文件和本人聊天风格。"
