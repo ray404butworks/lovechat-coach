@@ -1,6 +1,6 @@
 # 恋聊教练：安装与首次配置
 
-恋聊教练（LoveChat Coach）是基于 [OpenDate Skill](https://github.com/sumitaich1998/OpenDate) 开发的微信约会聊天助手。保留其原始技能、阶段判断、口吻改写、质量复审与安全检查，并加入 Windows 图形界面、历史导入、双方记忆、人设、关系目标及首次配置引导。保留 OpenDate 的 MIT 许可证，不是微信、腾讯或模型服务的官方产品。
+恋聊教练（LoveChat Coach）v0.3 以 [goutoujunshi](https://github.com/shengjidaguai-china/goutoujunshi) 的情绪、证据与行动方法为主体，提供回复、局面分析、表达复盘和逐轮演练。保留 [OpenDate](https://github.com/sumitaich1998/OpenDate) 的桌面接入基础，以及聊天导入、人设、双方信息与首次配置引导。两者的 MIT 许可和来源均已保留；本项目不是微信、腾讯或模型服务的官方产品。
 
 ## 安装
 
