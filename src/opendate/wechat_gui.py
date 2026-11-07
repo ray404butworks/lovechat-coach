@@ -25,10 +25,14 @@ from .wechat_memory import (
 from .wechat_profile import MyPersona, load_persona, save_settings
 from .wechat_text import TxtIdentityError
 from .wechat_strategy import (
-    ACTIONS, INTENTS, PRIMARY_SKILLS, SKILL_LABELS, STAGES, StrategySettings,
+    ACTIONS, INTENTS, STAGES, StrategySettings,
     latest_report, load_settings as load_strategy, report_text,
     save_settings as save_strategy,
 )
+from .coach.knowledge import MODES, SCENES, references
+from .coach.memory import CoachMemory
+from .coach.models import render
+from .coach.pipeline import save_candidates
 from .wechat_theme import (
     FONT_EDITOR, FONT_SECTION, FONT_STRONG, FONT_TITLE, LIGHT, NativeTheme, ReplySplit, ScrollPanel,
     enable_dpi_awareness,
@@ -174,9 +178,9 @@ class WeChatWindow:
         self.tabs.enable_traversal()
         self.tabs.pack(fill="both", expand=True)
         reply = ttk.Frame(self.tabs, padding=16)
-        self.tabs.add(reply, text="回复建议")
+        self.tabs.add(reply, text="回复与军师")
         pages = []
-        for title in ("聊天历史", "长期记忆", "我的人设与风格", "双方信息与目标", "接入与说明", "约会策略"):
+        for title in ("聊天历史", "长期记忆", "我的人设与风格", "双方信息与目标", "接入与说明", "军师方案"):
             host = ScrollPanel(self.tabs)
             self.tabs.add(host, text=title)
             pages.append(host.body)
@@ -220,16 +224,19 @@ class WeChatWindow:
         outgoing_head = ttk.Frame(outgoing_panel)
         outgoing_head.pack(fill="x", pady=(0, 8))
         ttk.Label(outgoing_head, text="我的回复建议", style="Section.TLabel").pack(side="left")
-        self.button(outgoing_head, "约会策略与执行结果", lambda: self.tabs.select(6)).pack(side="right")
+        self.button(outgoing_head, "选择模式 / 当前问题", lambda: self.tabs.select(6)).pack(side="right")
         self.reply = self.text(outgoing_panel, height=5)
         self.reply.pack(fill="both", expand=True)
+        ttk.Label(outgoing_panel, text="军师首选与下一步", style="Section.TLabel").pack(anchor="w", pady=(10, 5))
+        self.coach_advice = self.text(outgoing_panel, height=7, readonly=True)
+        self.coach_advice.pack(fill="both", expand=True)
         row = ttk.Frame(outgoing_footer)
         row.pack(fill="x", pady=(12, 8))
-        self.button(row, "生成一条回复", self.generate, primary=True).pack(side="left")
+        self.button(row, "生成本轮方案", self.generate, primary=True).pack(side="left")
         self.button(row, "复制回复", self.copy_reply).pack(side="left", padx=8)
         ttk.Label(outgoing_footer, text="草稿可修改，复制后自行发送", style="Muted.TLabel").pack(anchor="w")
         self.reply.bind("<<Modified>>", self.reply_changed)
-        self.strategy_summary = tk.StringVar(value="约会流程已开启：选技能 → 初稿 → 口吻改写 → 质量与安全复审")
+        self.strategy_summary = tk.StringVar(value="军师流程：分清事实与推测 → 一个主动作 → 后续分支与停止条件 → 复审")
         ttk.Label(outgoing_footer, textvariable=self.strategy_summary, wraplength=800,
                   style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
 
@@ -252,6 +259,15 @@ class WeChatWindow:
 
         ttk.Label(notes, text="只保存你确认过的重要事实，随时可以修改或删除。",
                   font=FONT_SECTION).pack(anchor="w")
+        self.coach_memory_status = tk.StringVar()
+        ttk.Label(notes, textvariable=self.coach_memory_status, style="Muted.TLabel").pack(anchor="w", pady=6)
+        controls = ttk.Frame(notes)
+        controls.pack(fill="x", pady=6)
+        for label, action in (("启用精简档案", "enable"), ("查看", "show"), ("暂停", "pause"),
+                              ("恢复", "resume"), ("撤销本对象更新", "undo"),
+                              ("撤回同意", "revoke"), ("忘记本对象", "forget")):
+            self.button(controls, label, lambda a=action: self.manage_coach_memory(a)).pack(side="left", padx=(0, 6))
+        self.refresh_coach_memory_status()
         ttk.Label(notes, text="这里保留共同经历、未完成约定及以前保存的记忆。\n"
                   "双方各自的信息与聊天目标，请在“双方信息与目标”页分别填写；历史整理的草稿仍需核对后保存。",
                   style="Muted.TLabel").pack(anchor="w", pady=10)
@@ -269,7 +285,7 @@ class WeChatWindow:
         self._build_brief(brief)
 
         help_text = (
-            "恋聊教练基于 OpenDate Skill 开发。可选历史集成来源：chatlog-keeper-skill（MIT）。\n\n"
+            "恋聊教练以 goutoujunshi 的情绪、证据与行动方法为主体，保留 OpenDate 的桌面与接入基础。\n\n"
             "当前画面：读取你已打开的指定私聊，先在本地选择对方的消息。不能用当前画面代表全部历史。\n\n"
             "历史文件：支持直接导入 TXT，也支持 chatlog-keeper 导出的 JSON 和单人 JSON 模板。"
             "TXT 会在本地自动转换，支持昵称一行、日期时间一行、后接消息正文的格式；"
@@ -320,12 +336,12 @@ class WeChatWindow:
             self.reply.edit_modified(False)
 
     def _build_strategy(self, panel):
-        ttk.Label(panel, text="约会技能与策略", font=FONT_SECTION).pack(anchor="w")
-        ttk.Label(panel, text="按当前对象独立保存。自动判断来自现有文字，阶段推测不代表对方已同意推进关系。",
+        ttk.Label(panel, text="军师模式与当前问题", font=FONT_SECTION).pack(anchor="w")
+        ttk.Label(panel, text="按对象独立保存。先分清事实、推测和未知，再给首选行动；普通开心不等于暧昧，邀约不等于关系承诺。",
                   wraplength=1040, style="Muted.TLabel").pack(anchor="w", pady=(8, 12))
         self.strategy_vars = {}
-        mappings = (("intent", "关系方向", INTENTS), ("action", "本次任务", ACTIONS),
-                    ("skill", "主要聊天技能", {k: SKILL_LABELS[k] for k in PRIMARY_SKILLS}),
+        mappings = (("mode", "这次怎么帮你", MODES), ("scene", "问题场景", SCENES),
+                    ("intent", "关系方向", INTENTS), ("action", "来信 / 主动", ACTIONS),
                     ("stage", "交流阶段", STAGES))
         self.strategy_maps = {key: values for key, _, values in mappings}
         for key, label, values in mappings:
@@ -337,12 +353,17 @@ class WeChatWindow:
                                state="readonly", width=32)
             box.pack(side="left")
             self.strategy_vars[key] = var
+        ttk.Label(panel, text="你现在想解决什么？分析、复盘、演练时在这里写经过或自己的原话；不知道的可留空。",
+                  wraplength=1000, style="Muted.TLabel").pack(anchor="w", pady=(12, 5))
+        self.coach_question = self.text(panel, height=3)
+        self.coach_question.pack(fill="x")
         self.show_strategy(load_strategy(self.memory, self.contact))
         row = ttk.Frame(panel.action_area)
         row.pack(fill="x", pady=(12, 8))
-        self.button(row, "保存此对象的约会策略", self.save_strategy, primary=True).pack(side="left")
-        self.button(row, "查看原版技能库", self.show_skill_library).pack(side="left", padx=8)
-        self.strategy_notice = tk.StringVar(value="完整流程已启用。切换选项后请保存，再生成回复。")
+        self.button(row, "保存模式与问题", self.save_strategy, primary=True).pack(side="left")
+        self.button(row, "查看当前场景的方法", self.show_skill_library).pack(side="left", padx=8)
+        self.button(row, "核对并保存本轮档案", self.save_coach_candidates).pack(side="left")
+        self.strategy_notice = tk.StringVar(value="切换模式或修改问题后请保存。精简档案候选不会在生成时自动保存。")
         ttk.Label(panel.action_area, textvariable=self.strategy_notice, wraplength=1040,
                   style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
         self.strategy_report = self.text(panel, height=15, readonly=True)
@@ -353,11 +374,14 @@ class WeChatWindow:
         data = {}
         for key, var in self.strategy_vars.items():
             data[key] = next(k for k, label in self.strategy_maps[key].items() if label == var.get())
-        return StrategySettings(**data)
+        return StrategySettings(**data, skill=self.legacy_skill,
+                                question=self.coach_question.get("1.0", "end").strip())
 
     def show_strategy(self, settings):
         for key, var in self.strategy_vars.items():
             var.set(self.strategy_maps[key][getattr(settings, key)])
+        self.legacy_skill = settings.skill
+        self.put(self.coach_question, settings.question)
 
     def save_strategy(self):
         try:
@@ -365,17 +389,64 @@ class WeChatWindow:
         except (ValueError, HistoryError, OSError) as exc:
             messagebox.showerror("策略未保存", str(exc), parent=self.root)
             return
-        self.strategy_notice.set("已保存。后续实际生成会使用这些约会设置。")
+        self.strategy_notice.set("已保存。本轮方案会使用所选模式、场景和当前问题。")
         self.packet = None
-        self.status.set("当前对象的约会策略已保存。")
+        self.status.set("当前对象的军师模式与问题已保存。")
 
     def show_skill_library(self):
-        from .skills.engine import SkillsEngine
-        engine = SkillsEngine()
-        lines = ["原版 14 个技能均已加载。资料筛选用于认识新对象，当前微信私聊不执行自动筛选。",
-                 "本人口吻、关系意图、安全边界三个技能始终叠加；其余 10 个聊天技能可自动或手动选择。"]
-        lines.extend(f"\n【{SKILL_LABELS[s.name]} / {s.name}】\n{s.body}" for s in engine)
-        self.show_text("原版 OpenDate 约会技能库", "\n".join(lines))
+        from .coach.knowledge import route
+        settings = self.editing_strategy()
+        scene = route(settings.question, self.incoming.get("1.0", "end"), settings.scene)
+        self.show_text("当前场景的军师方法", "\n\n".join(
+            item["path"] + "\n" + item["text"] for item in references(scene)))
+
+    def coach_memory_store(self):
+        return CoachMemory(self.memory.path.with_name("coach-memory.sqlite3"))
+
+    def refresh_coach_memory_status(self):
+        state = self.coach_memory_store().status()
+        self.coach_memory_status.set("精简档案：" + ("已暂停" if state["paused"] else "已启用" if state["enabled"] else "未启用")
+                                     + "；与完整聊天历史分开，候选经核对保存，可撤销。")
+
+    def manage_coach_memory(self, action):
+        store = self.coach_memory_store()
+        try:
+            if action == "show":
+                rows = store.rows(self.contact)
+                self.show_text("当前对象的精简档案", "\n\n".join(
+                    f"{r['scope']} · {r['field']}\n{r['value']}\n来源：{r['source_type']} / {r['source_ref']}" for r in rows) or "暂无精简档案。")
+            elif action == "enable":
+                if not messagebox.askyesno("启用精简档案", "允许在本机保存有来源的精简关系档案吗？\n"
+                                           "生成只提出候选；你核对后才保存，可暂停、撤销或删除。", parent=self.root):
+                    return
+                store.control("enable", confirmed=True)
+            elif action == "forget":
+                if not messagebox.askyesno("忘记当前对象", f"删除 {self.contact} 的精简档案和撤销历史？\n完整聊天导入与旧记忆保留。", parent=self.root):
+                    return
+                store.forget(self.contact, confirmed=True)
+            elif action == "undo":
+                store.undo(self.contact)
+            else:
+                store.control(action)
+            self.refresh_coach_memory_status()
+            self.packet = None
+        except (HistoryError, OSError) as exc:
+            messagebox.showerror("档案操作未完成", str(exc), parent=self.root)
+
+    def save_coach_candidates(self):
+        report = latest_report(self.memory, self.contact)
+        candidates = report.get("memory_candidates", [])
+        if not candidates:
+            messagebox.showinfo("没有候选", "本轮没有待保存的精简档案。", parent=self.root)
+            return
+        preview = "\n\n".join(f"{r['scope']}：{r['value']}\n来源：{r['source_ref']}" for r in candidates)
+        if not messagebox.askyesno("核对本轮精简档案", preview + "\n\n确认以上内容准确并保存？", parent=self.root):
+            return
+        try:
+            save_candidates(self.memory, self.contact, report)
+            self.strategy_notice.set("本轮精简档案已保存；可在长期记忆页查看或撤销。")
+        except (HistoryError, OSError) as exc:
+            messagebox.showerror("尚未保存", str(exc), parent=self.root)
 
     def _build_profile(self, panel):
         ttk.Label(panel, text="这是你自己的说话设定，保存后用于生成回复。",
@@ -525,7 +596,9 @@ class WeChatWindow:
             self.show_strategy(self.strategy_drafts.get(self.contact, load_strategy(self.memory, self.contact)))
             self.strategy_notice.set("当前对象的策略独立保存；未保存选择仍留在本窗口。")
             self.put(self.strategy_report, report_text(latest_report(self.memory, self.contact)), readonly=True)
-            self.strategy_summary.set("已切换对象，请在约会策略页核对当前设置。")
+            self.strategy_summary.set("已切换对象，请在军师方案页核对当前设置。")
+            self.put(self.coach_advice, render(latest_report(self.memory, self.contact).get("answer", {})), readonly=True)
+            self.refresh_coach_memory_status()
             self.show_brief(self.brief_drafts.get(self.contact, self.memory.brief(self.contact)))
             self.brief_notice.set("当前对象的信息与目标独立保存；草稿需点击保存后才供 AI 使用。")
             self.put(self.notes, self.note_drafts.get(self.contact, self.memory.notes(self.contact)))
@@ -956,20 +1029,22 @@ class WeChatWindow:
         revision = self.incoming.get("1.0", "end").strip()
         self.reviewed_text = ""
         self.put(self.reply, "")
-        self.put(self.strategy_report, "正在执行本次约会策略，尚未通过复审。", readonly=True)
-        self.strategy_summary.set("正在判断阶段、选择技能并逐步复审…")
+        self.put(self.strategy_report, "正在生成本轮军师方案，尚未通过复审。", readonly=True)
+        self.put(self.coach_advice, "正在分清事实、推测与未知…", readonly=True)
+        self.strategy_summary.set("正在编排本轮主动作、反馈分支与停止条件…")
         self.status.set("AI 正在结合本地记忆生成回复，通常需要等待一会儿…")
         def done(value):
             self.reviewed_text = value.text
             self.put(self.reply, value.text)
             self.put(self.strategy_report, report_text(value.report), readonly=True)
+            self.put(self.coach_advice, render(value.report.get("answer", {}),
+                                             value.report.get("evidence_sources", {})), readonly=True)
             if value.blocked:
                 self.strategy_summary.set("本次已暂停：" + value.report.get("notice", "请查看策略页。"))
-                self.status.set("本次未给出可用草稿，请在约会策略页查看检查结果。")
+                self.status.set("本次未给出通过复审的方案，请在军师方案页查看原因。")
                 self.tabs.select(6)
                 return
-            self.strategy_summary.set("本次采用：" + SKILL_LABELS[value.report['skill']] +
-                                      " · 口吻改写、质量与安全检查均已通过")
+            self.strategy_summary.set("本轮主动作：" + value.report["answer"]["main_action"] + " · 证据与安全复审通过，仍需本人核对")
             self.output_revision = revision
             self.status.set("回复已生成，可修改后复制。" if self.incoming.get("1.0", "end").strip() == revision
                             else "回复基于生成开始时的消息；输入已改变，请核对或重新生成。")

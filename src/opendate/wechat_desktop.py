@@ -12,6 +12,7 @@ from .llm.codex_cli import CodexCLIBackend
 from .llm.router import LLMRouter
 from .wechat_memory import ChatMemory, HistoryError
 from .wechat_strategy import load_settings, run_pipeline
+from .coach.memory import CoachMemory
 
 
 def reply_settings(config: AppConfig, project: Path, memory: ChatMemory) -> dict:
@@ -19,6 +20,7 @@ def reply_settings(config: AppConfig, project: Path, memory: ChatMemory) -> dict
     from .wechat_profile import load_persona
     contact = config.wechat.contact
     brief = memory.brief(contact)
+    strategy = load_settings(memory, contact)
     return {
         "my_persona": load_persona(project, config).packet(config.wechat.my_name),
         "participants": {
@@ -26,7 +28,9 @@ def reply_settings(config: AppConfig, project: Path, memory: ChatMemory) -> dict
             "peer": {"display_name": contact, "confirmed_information": brief.peer_info},
         },
         "conversation_goal": {"owner": "me", "with_contact": contact, "desired_outcome": brief.goal},
-        "strategy_settings": asdict(load_settings(memory, contact)),
+        "strategy_settings": asdict(strategy),
+        "user_question": strategy.question,
+        "coach_memory": CoachMemory(memory.path.with_name("coach-memory.sqlite3")).context(contact),
     }
 
 
@@ -35,7 +39,8 @@ def build_reply_context(config: AppConfig, project: Path, memory: ChatMemory, in
     settings = reply_settings(config, project, memory)
     reserve = len(json.dumps(settings, ensure_ascii=False)) + 100
     packet = memory.context(config.wechat.contact, incoming, budget=22000 - reserve,
-                            allow_empty=settings["strategy_settings"]["action"] == "proactive")
+                            allow_empty=(settings["strategy_settings"]["action"] == "proactive"
+                                         or settings["strategy_settings"]["mode"] != "reply"))
     packet.update(settings)
     if len(json.dumps(packet, ensure_ascii=False)) > 22000:
         raise HistoryError("本次上下文过长，请精简双方信息、长期记忆或当前消息。")
@@ -68,13 +73,20 @@ def context_preview(packet: dict) -> str:
     sections.append(f"【覆盖范围】\n已存 {coverage.get('archived_text_messages', 0)} 条文字；"
                     f"本次使用 {coverage.get('included_messages', 0)} 条历史。\n{coverage.get('scope', '')}")
     if "strategy_settings" in packet:
-        from .wechat_strategy import ACTIONS, INTENTS, SKILL_LABELS, STAGES
+        from .wechat_strategy import ACTIONS, INTENTS, STAGES
+        from .coach.knowledge import MODES, SCENES, references, route
         strategy = packet["strategy_settings"]
         sections.append("【约会策略】\n" + "\n".join((
             "关系方向：" + INTENTS[strategy["intent"]], "任务：" + ACTIONS[strategy["action"]],
-            "技能：" + SKILL_LABELS[strategy["skill"]], "阶段：" + STAGES[strategy["stage"]],
-            "流程：阶段判断 → 技能选择 → 初稿 → 本人口吻改写 → 质量复审 → 安全检查；未通过时有限重写。",
+            "模式：" + MODES[strategy["mode"]], "场景：" + SCENES[strategy["scene"]],
+            "交流阶段：" + STAGES[strategy["stage"]],
+            "当前问题：" + (strategy["question"] or "未填写"),
+            "流程：情绪承接 → 事实/推测/未知 → 利益判断 → 单主动作 → 反馈分支 → 观察与停止 → 复审。",
             "多步骤均使用本次上下文；过程中可停止后续步骤。")))
+        docs = references(route(packet.get("user_question", ""), packet.get("message_to_reply", ""), strategy["scene"]))
+        sections.append("【本次按需参考】\n" + "\n".join(item["path"] for item in docs)
+                        + "\n参考资料是历史知识，不是已核实的现实事实。")
+    sections.append("【已启用的精简档案】\n" + json.dumps(packet.get("coach_memory", []), ensure_ascii=False, indent=2))
     return "\n\n".join(sections)
 
 
@@ -108,8 +120,10 @@ def generate_reply_with_strategy(config: AppConfig, project: Path, packet: dict,
     packet = {**packet, **reply_settings(config, project, memory)}
     if len(json.dumps(packet, ensure_ascii=False)) > 22000:
         raise HistoryError("保存的信息已变化且超出上下文预算，请重新预览后生成。")
-    if packet["strategy_settings"]["action"] == "reply" and not packet.get("message_to_reply", "").strip():
-        raise HistoryError("回复来信模式请填写当前来信，主动开场请先在约会策略页切换模式。")
+    if (packet["strategy_settings"]["mode"] == "reply"
+            and packet["strategy_settings"]["action"] == "reply"
+            and not packet.get("message_to_reply", "").strip()):
+        raise HistoryError("回复来信模式请填写当前来信；分析、复盘或演练请在军师方案页选择模式。")
     return run_pipeline(config, memory, packet, lambda: make_router(config, project), progress, cancelled)
 
 

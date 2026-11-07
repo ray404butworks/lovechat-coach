@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lovechat-coach"
-version = "0.2.0"
-description = "LoveChat Coach — a local-first WeChat dating coach based on OpenDate skills."
+version = "0.3.0"
+description = "LoveChat Coach — evidence-led relationship coaching based on goutoujunshi, with a local WeChat desktop."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -71,6 +71,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 opendate = ["skills/registry/*/SKILL.md", "py.typed"]
+"opendate.coach" = ["references/knowledge/*.md", "references/practical/*.md", "upstream.json", "UPSTREAM_LICENSE.txt"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

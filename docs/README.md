@@ -1,5 +1,7 @@
 # OpenDate documentation
 
+LoveChat Coach v0.3 的微信桌面入口、军师决策与精简档案请先读 [军师架构](coach-architecture.md) 和 [安装说明](share-installation.md)。以下英文文档主要说明保留兼容的 OpenDate CLI、连接器和底层模块。
+
 Welcome to the full documentation for **OpenDate** — an open-source, consent-first
 "vibe-dating" AI agent. You bring your own [Tinder](connectors.md) token and an
 LLM API key for [any of 19 provider routes](providers.md); OpenDate screens

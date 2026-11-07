@@ -1,5 +1,7 @@
 # Architecture
 
+For LoveChat Coach's v0.3 WeChat desktop decision kernel, see [Coach architecture](coach-architecture.md). This page documents the retained OpenDate CLI and foundational modules.
+
 This page is the big-picture map of OpenDate: the modules and what they own, the
 runtime loop step by step, how data flows, the conversation state store and
 stage machine, and how decisions are logged. For deeper dives, follow the

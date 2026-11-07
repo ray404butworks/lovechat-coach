@@ -86,7 +86,7 @@ def build(project: Path, output: Path, archive: Path):
         target = output / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-    manifest = {"project":"LoveChat Coach", "version":"0.2.0", "privacy_scan":"passed",
+    manifest = {"project":"LoveChat Coach", "version":"0.3.0", "privacy_scan":"passed",
                 "source_files":len(files), "excluded":["private runtime data", "local configuration",
                 "chat transcripts", "keys and account caches", "screenshots", "virtual environment",
                 "local logs and machine-specific deliverables", "Git history"],
