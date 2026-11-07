@@ -120,11 +120,74 @@ def test_model_safety_rejection_is_enforced_through_final_retry(tmp_path, monkey
 
 
 @pytest.mark.parametrize("incoming,skill", [("哈哈你就吹吧，算你赢", "banter"),
-                                            ("哈哈跟你聊天好开心", "flirting")])
+                                            ("我对你有好感", "flirting")])
 def test_chinese_tone_reaches_original_automatic_skills(tmp_path, monkeypatch, incoming, skill):
     config, _, _, packet = setup(tmp_path, monkeypatch, incoming=incoming)
     result = generate_reply_with_strategy(config, tmp_path, packet)
     assert result.report["skill"] == skill
+
+
+@pytest.mark.parametrize("incoming", ["哈哈", "好呀", "哈哈跟你聊天好开心", "😊", "哈哈你就吹吧"])
+def test_friendly_tone_does_not_automatically_advance_stage(tmp_path, monkeypatch, incoming):
+    config, _, _, packet = setup(tmp_path, monkeypatch, incoming=incoming)
+    result = generate_reply_with_strategy(config, tmp_path, packet)
+    assert result.report["stage"] not in {"flirting", "proposing"}
+    assert result.report["skill"] != "flirting"
+    assert result.report["invitation"]["status"] == "none"
+
+
+@pytest.mark.parametrize("old_reply,status", [("去不了", "declined"), ("改天再说", "deferred"),
+                                             ("取消吧", "cancelled")])
+def test_closed_invitation_does_not_keep_stage_proposing(tmp_path, monkeypatch, old_reply, status):
+    config, memory, router, _ = setup(tmp_path, monkeypatch)
+    archive(memory, [(5, "me", "一起去看电影？"), (4, "peer", old_reply),
+                     (3, "me", "今天降温了")])
+    result = generate_reply_with_strategy(config, tmp_path, build_reply_context(config, tmp_path, memory, "好呀"))
+    assert result.report["stage"] != "proposing"
+    assert result.report["invitation"]["status"] == status
+    for _, _, actual in router.calls:
+        assert actual["conversation_judgment"]["invitation"]["status"] == status
+    assert memory.stats("对象甲")[0] == 3
+
+
+def test_old_invitation_expires_and_never_becomes_a_meeting(tmp_path, monkeypatch):
+    config, memory, _, _ = setup(tmp_path, monkeypatch)
+    archive(memory, [(400, "me", "一起喝咖啡？"), (399, "peer", "好呀")])
+    result = generate_reply_with_strategy(config, tmp_path, build_reply_context(config, tmp_path, memory, "今天降温了"))
+    assert result.report["stage"] != "proposing"
+    assert result.report["invitation"]["status"] == "expired"
+
+
+def test_llm_tiebreak_cannot_turn_politeness_into_flirting(tmp_path, monkeypatch):
+    router = Router()
+    chat = router.chat
+    def select_flirting(system, user, **kwargs):
+        if "WORKFLOW_PHASE: selection" in system:
+            return '{"skill":"flirting"}'
+        return chat(system, user, **kwargs)
+    router.chat = select_flirting
+    config, _, _, packet = setup(tmp_path, monkeypatch, router=router, incoming="好呀")
+    result = generate_reply_with_strategy(config, tmp_path, packet)
+    assert result.report["skill"] == "rapport-building"
+    assert result.report["stage"] == "opened"
+
+
+def test_draft_goals_and_repeated_generation_do_not_create_invitation(tmp_path, monkeypatch):
+    config, memory, _, packet = setup(tmp_path, monkeypatch)
+    for _ in range(2):
+        result = generate_reply_with_strategy(config, tmp_path, packet)
+        assert result.report["invitation"]["status"] == "none"
+        assert result.report["stage"] != "proposing"
+    assert memory.stats("对象甲")[0] == 0
+
+
+def test_reusing_archived_incoming_does_not_renew_relative_invitation_date(tmp_path, monkeypatch):
+    config, memory, _, _ = setup(tmp_path, monkeypatch)
+    archive(memory, [(400, "peer", "明天一起吃饭？")])
+    packet = build_reply_context(config, tmp_path, memory, "明天一起吃饭？")
+    results = [generate_reply_with_strategy(config, tmp_path, packet) for _ in range(2)]
+    assert all(r.report["invitation"]["status"] == "expired" for r in results)
+    assert results[0].report["invitation"] == results[1].report["invitation"]
 
 
 def test_automatic_invitation_requires_actual_exchange_and_meeting_cue(tmp_path, monkeypatch):

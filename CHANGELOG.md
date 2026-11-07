@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Separate friendly tone and banter from explicit romantic signals in WeChat automatic stage and skill selection.
+- Replay visible invitation messages with acceptance, refusal, deferral, rescheduling, cancellation and expiry; old proposals and generated drafts no longer imply a current meeting discussion.
+- Include invitation evidence, tone and judgment scope in strategy reports and all model workflow steps.
+
 ## [0.1.0] - 2026-06-07
 
 Initial public release.

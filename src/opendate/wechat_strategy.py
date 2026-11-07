@@ -24,6 +24,7 @@ from .persona.ingest import IngestResult
 from .persona.style import StyleTransfer
 from .skills.engine import SkillsEngine, SkillSelection
 from .wechat_memory import ChatMemory, HistoryError, REPLY_SYSTEM
+from .wechat_judgment import INVITATION_LABELS, invitation_state, romantic_signal
 
 SKILL_LABELS = {
     "auto": "自动选择", "opener": "开场破冰", "approaching": "初步接近",
@@ -109,10 +110,19 @@ def report_text(report: dict) -> str:
              f"主要技能：{SKILL_LABELS.get(report.get('skill'), '未选择')}",
              "叠加技能：" + "、".join(SKILL_LABELS[s] for s in report.get("modifiers", [])),
              "选择依据：" + report.get("reason", ""),
+             "可见来信语气：" + report.get("tone", "未判断"),
+             "邀约状态：" + INVITATION_LABELS.get(report.get("invitation", {}).get("status"), "未判断"),
+             "阶段依据：" + report.get("stage_reason", "旧报告未记录"),
              "资料范围：仅本次预览中的文字与已保存设定；没有读取未接通的微信历史。",
              f"本人口吻样本：{report.get('persona_samples', 0)} 条本次上下文中的真实我方消息",
              "\n实际执行："]
     lines.extend(f"• {step}" for step in report.get("steps", []))
+    invite = report.get("invitation", {})
+    if invite.get("target_date"):
+        lines.append("邀约日期：" + invite["target_date"] + "（按消息日期解析，请核对）")
+    for evidence in invite.get("evidence", []):
+        who = "我" if evidence["sender"] == "me" else "对方"
+        lines.append(f"邀约依据：{evidence['timestamp']} {who}：{evidence['text']}")
     if report.get("quality") is not None:
         lines.append(f"质量评分：{report['quality']:.2f}（启发式和模型复审，不是关系成功率）")
     if report.get("notice"):
@@ -135,11 +145,11 @@ def _messages(packet, *, current=True):
                         sender="me" if r["sender"] == "me" else "them", text=r["text"],
                         sent_at=datetime.fromisoformat(r["timestamp"])) for r in rows]
     incoming = packet.get("message_to_reply", "").strip()
-    # Same text earlier in history is not proof the current utterance is old.
+    # A duplicate of the latest archived peer message retains its real time.
+    # Otherwise every regeneration would renew relative dates and expiry.
+    # Identical text elsewhere in history is not enough to deduplicate input.
     if current and incoming:
-        if messages and not messages[-1].from_me and messages[-1].text.strip() == incoming:
-            messages[-1] = messages[-1].model_copy(update={"sent_at": datetime.now(timezone.utc)})
-        else:
+        if not (messages and not messages[-1].from_me and messages[-1].text.strip() == incoming):
             messages.append(Message(id="current-input", match_id=packet["contact"], sender="them",
                                     text=incoming, sent_at=datetime.now(timezone.utc)))
     return messages
@@ -155,22 +165,36 @@ def plan(config, packet, settings, previous=None):
     negative = bool(re.search(r"不太想|没心情|先不聊|改天再说|有点难过|今天很累|不开心", text))
     # A short answer or an emoji alone is not consent, rejection or flirting evidence.
     disinterest = bool(re.search(r"不想继续|不合适|没兴趣|不想发展|别再追|不想聊了", text))
-    playful = banter or positive
+    # Tone is independent of romantic intent. Neither laughing nor banter is
+    # sufficient evidence for the flirting stage or automatic flirting skill.
+    playful = romantic_signal(text)
     rapport = ctx.rapport_score
-    explicit_meet = bool(re.search(r"见(?:个)?面|约(?:个)?时间|一起.*(?:吃饭|喝咖啡|看展|电影)|哪天有空|周末有空", text))
+    invitation = invitation_state(match.messages)
     ctx = replace(ctx, banter=banter, playful=playful, disinterest=disinterest,
                   sentiment="negative" if negative else "positive" if positive else "neutral",
-                  ready_for_date=ctx.ready_for_date and explicit_meet,
+                  ready_for_date=invitation.active and (invitation.proposer == "them"
+                                                       or invitation.status == "accepted"),
                   interest="unknown", rapport_score=rapport)
-    proposed = any(m.from_me and re.search(r"一起.*(?:吃饭|看展|咖啡|电影)|见面|约个时间", m.text)
-                   for m in match.messages)
-    stage = compute_stage(ctx, previous=previous, proposed_date=proposed)
+    stage = compute_stage(ctx, previous=previous, proposed_date=invitation.active)
     if stage == ConversationStage.FLIRTING and not playful:
         stage = ConversationStage.RAPPORT
     if settings.stage != "auto":
         stage = ConversationStage(settings.stage)
     ctx = replace(ctx, stage=stage.value)
     return match, ctx, stage
+
+
+def judgment_details(match, ctx):
+    invitation = invitation_state(match.messages)
+    tone = ("情绪低落或暂不想聊" if ctx.sentiment == "negative" else
+            "轻松调侃" if ctx.banter else "轻松积极" if ctx.sentiment == "positive" else "普通交流")
+    if invitation.active:
+        reason = "可见真实消息中有仍有效的邀约；接受、改期与恋爱关系分别判断。"
+    elif ctx.playful:
+        reason = "对方本次有明确好感表达；不代表双方已确认恋爱关系。"
+    else:
+        reason = "按可见往返和等待状态判断；普通开心、表情与调侃不作为暧昧依据。"
+    return {"tone": tone, "invitation": asdict(invitation), "stage_reason": reason}
 
 
 class PhaseRouter:
@@ -193,6 +217,10 @@ class PhaseRouter:
                        "下列约会技能是行动建议；本人已保存的人设、双方事实、最终目标和对方边界优先。"
                        "当前任务为主动跟进且没有来信时，不得假装对方刚发了消息。"
                        "不得把调侃、回复字数或规则阶段推测当成恋爱意愿；不得虚构故事、经历或约会进展。"
+                       "conversation_judgment 只描述可见消息中的语气与邀约状态，不是双方关系的确认。"
+                       "待回应的我方邀约不要重复催约；被拒绝、暂缓或取消的安排不要擅自重启。"
+                       "改期须等另一方确认；接受邀约只表示愿意见面，回复应核对现有安排，不重复邀约。"
+                       "过期安排是否完成未知，不得当成已见面；普通开心和调侃不要强行转成暧昧。"
                        "改写和复审必须保留双方信息归属及用户明确禁用表达。\n"
                        f"WORKFLOW_PHASE: {self.phase}\n" + system)
         if self.phase == "quality":
@@ -268,6 +296,16 @@ def _run_pipeline(config, memory, packet, router_factory, progress, cancelled, r
     report.update(contact=packet["contact"], settings=asdict(settings), stage=stage.value,
                   status="blocked", steps=[], reason="", modifiers=[], quality=None,
                   timestamp=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"))
+    report.update(judgment_details(match, ctx))
+    if settings.stage != "auto":
+        report["stage_reason"] = "交流阶段由你手动指定；语气与邀约仍按真实消息单独判断。"
+    # Selection, drafting and every review see the same evidence and lifecycle.
+    # This does not persist predictions as facts or add them to chat history.
+    packet = {**packet, "conversation_judgment": {
+        **{k: report[k] for k in ("tone", "invitation", "stage_reason")},
+        "relationship": "未通过本次自动规则确认；以双方已确认事实为准",
+        "scope": "仅本次预览中的真实消息；目标和生成草稿不计入邀约",
+    }}
 
     def check():
         if cancelled():
@@ -328,6 +366,11 @@ def _run_pipeline(config, memory, packet, router_factory, progress, cancelled, r
     selection_router.require_success()
     if settings.skill != "auto":
         selection = SkillSelection(engine.get(settings.skill), engine.modifiers(), "由用户手动指定技能。")
+    elif ((selection.primary.name == "flirting" and not ctx.playful)
+          or (selection.primary.name in {"proposing-a-date", "number-exchange"}
+              and not ctx.ready_for_date)):
+        selection = SkillSelection(engine.get("rapport-building"), engine.modifiers(),
+                                   "没有足够的当前好感表达或有效见面线索，先自然回应。")
     # Existing WeChat contact already has a messaging channel. No gratuitous number request.
     if settings.skill == "auto" and selection.primary.name == "number-exchange":
         selection = SkillSelection(engine.get("proposing-a-date"), engine.modifiers(),
@@ -342,7 +385,7 @@ def _run_pipeline(config, memory, packet, router_factory, progress, cancelled, r
     if ctx.their_asked_question:
         observations.append("对方提出了问题")
     if ctx.ready_for_date:
-        observations.append("已有往返交流且出现见面线索")
+        observations.append("可见消息中有对方提出或双方接受的有效见面安排")
     observations.append(f"本次可见对话 {ctx.num_messages} 条")
     if selection.decided_by == "llm-tiebreak":
         observations.append("模糊情况由模型在候选技能中择优")
