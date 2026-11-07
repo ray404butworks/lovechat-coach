@@ -1,4 +1,4 @@
-"""OpenDate's actual skill, stage, voice, critique and guard pipeline for WeChat.
+"""Compatibility settings and workflow hints for the evidence-led coach kernel.
 
 All inputs are the previewable, contact-scoped packet. Drafts and copies never
 become sent messages or advance a real-world milestone. No connector can send.
@@ -6,7 +6,6 @@ become sent messages or advance a real-world milestone. No connector can send.
 from __future__ import annotations
 
 import json
-import math
 import re
 import uuid
 from dataclasses import asdict, dataclass, field, replace
@@ -14,17 +13,12 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from .connectors.base import Match, Message
-from .llm.router import extract_json
 from .orchestrator.loop import build_situation
-from .orchestrator.quality import critique_message
-from .orchestrator.safety import SafetyGuard
-from .orchestrator.state import ConversationStage, ConversationState, compute_stage, normalize_text
-from .persona.analyze import analyze_persona
-from .persona.ingest import IngestResult
-from .persona.style import StyleTransfer
-from .skills.engine import SkillsEngine, SkillSelection
-from .wechat_memory import ChatMemory, HistoryError, REPLY_SYSTEM
+from .orchestrator.state import ConversationStage, compute_stage
+from .wechat_memory import ChatMemory, HistoryError
 from .wechat_judgment import INVITATION_LABELS, invitation_state, romantic_signal
+from .coach.knowledge import MODES, SCENES
+from .coach.models import render
 
 SKILL_LABELS = {
     "auto": "自动选择", "opener": "开场破冰", "approaching": "初步接近",
@@ -51,10 +45,15 @@ class StrategySettings:
     skill: str = "auto"
     action: str = "reply"
     stage: str = "auto"
+    mode: str = "reply"
+    scene: str = "auto"
+    question: str = ""
 
     def validate(self):
         if (self.intent not in INTENTS or self.skill not in PRIMARY_SKILLS
-                or self.action not in ACTIONS or self.stage not in STAGES):
+                or self.action not in ACTIONS or self.stage not in STAGES
+                or self.mode not in MODES or self.scene not in SCENES
+                or not isinstance(self.question, str) or len(self.question) > 3000):
             raise HistoryError("聊天策略设置无效，请重新选择并保存。")
 
 
@@ -100,7 +99,21 @@ class StrategyResult:
 
 def report_text(report: dict) -> str:
     if not report:
-        return "生成后显示实际采用的技能、判断依据、改写和检查结果。"
+        return "生成后显示事实、推测、首选行动、反馈分支、观察窗口与停止条件。"
+    if report.get("method") == "goutoujunshi":
+        lines = [f"对象：{report['contact']} · {MODES[report['settings']['mode']]} · "
+                 + SCENES[report['scene']],
+                 "结果：" + ("已通过复审，仍需本人核对" if report["status"] == "passed" else "本次暂停"),
+                 "", render(report.get("answer", {}), report.get("evidence_sources", {})),
+                 "", "交流阶段：" + STAGES.get(report["stage"], report["stage"]),
+                 "语气：" + report.get("tone", "未判断"),
+                 "邀约：" + INVITATION_LABELS.get(report.get("invitation", {}).get("status"), "未判断"),
+                 "依据范围：仅本次可见文字与本人保存的资料；参考文档不等于现实事实。",
+                 "本次按需读取：" + "、".join(report.get("references", [])),
+                 "记忆：" + report.get("memory_notice", "本次未自动保存精简档案。")]
+        if report.get("notice"):
+            lines.extend(("", report["notice"]))
+        return "\n".join(lines)
     lines = [f"对象：{report['contact']}", "时间：" + report.get("timestamp", ""),
              f"结果：{'通过，可核对后使用' if report['status'] == 'passed' else '暂停生成'}",
              f"关系方向：{INTENTS[report['settings']['intent']]}",
@@ -197,68 +210,6 @@ def judgment_details(match, ctx):
     return {"tone": tone, "invitation": asdict(invitation), "stage_reason": reason}
 
 
-class PhaseRouter:
-    """Same locked Codex backend, with scoped multi-pass calls explicitly enabled.
-
-    Original components' optional review failures are surfaced, never called a
-    successful review. Full packet accompanies each stage to preserve ownership.
-    """
-    is_stub = False
-    prefers_single_call = False
-
-    def __init__(self, router, packet, phase, check):
-        self.router, self.packet, self.phase, self.check = router, packet, phase, check
-        self.failed = False
-
-    def chat(self, system, user, **kwargs):
-        self.check()
-        instruction = (REPLY_SYSTEM + "\n当前执行约会回复流程的一个独立步骤。"
-                       "本步骤要求 JSON 时只输出 JSON，其余情况下只输出草稿正文。"
-                       "下列约会技能是行动建议；本人已保存的人设、双方事实、最终目标和对方边界优先。"
-                       "当前任务为主动跟进且没有来信时，不得假装对方刚发了消息。"
-                       "不得把调侃、回复字数或规则阶段推测当成恋爱意愿；不得虚构故事、经历或约会进展。"
-                       "conversation_judgment 只描述可见消息中的语气与邀约状态，不是双方关系的确认。"
-                       "待回应的我方邀约不要重复催约；被拒绝、暂缓或取消的安排不要擅自重启。"
-                       "改期须等另一方确认；接受邀约只表示愿意见面，回复应核对现有安排，不重复邀约。"
-                       "过期安排是否完成未知，不得当成已见面；普通开心和调侃不要强行转成暧昧。"
-                       "改写和复审必须保留双方信息归属及用户明确禁用表达。\n"
-                       f"WORKFLOW_PHASE: {self.phase}\n" + system)
-        if self.phase == "quality":
-            instruction += ("\n复审时还要对照完整上下文检查双方事实归属、禁用表达、目标与草稿是否一致。"
-                            "虚构经历、颠倒偏好、强行推进或违反明确风格要求时，score 必须低于 0.5 并给出问题。")
-        payload = {**self.packet, "workflow_request": user}
-        try:
-            result = self.router.chat(instruction, json.dumps(payload, ensure_ascii=False), **kwargs)
-            if self.phase in {"quality", "safety", "selection"}:
-                data = extract_json(result)
-                valid = isinstance(data, dict)
-                if valid and self.phase == "quality":
-                    score = data.get("score")
-                    valid = (type(score) in (float, int) and math.isfinite(score) and 0 <= score <= 1
-                             and isinstance(data.get("issues"), list)
-                             and all(isinstance(i, str) for i in data["issues"]))
-                elif valid and self.phase == "safety":
-                    valid = type(data.get("allowed")) is bool and isinstance(data.get("reason"), str)
-                elif valid:
-                    valid = data.get("skill") in PRIMARY_SKILLS[1:]
-                if not valid:
-                    raise HistoryError("模型复审返回内容无效，本次未标记为通过，请重新生成。")
-            elif not isinstance(result, str) or not result.strip():
-                raise HistoryError("模型没有返回有效草稿，请重新生成。")
-            self.check()
-            return result
-        except Exception:
-            self.failed = True
-            raise
-
-    def chat_json(self, system, user, **kwargs):
-        return extract_json(self.chat(system, user, **kwargs))
-
-    def require_success(self):
-        if self.failed:
-            raise HistoryError("聊天策略流程有一步未完成，本次未标记为通过，请重新生成。")
-
-
 def run_pipeline(config, memory: ChatMemory, packet: dict, router_factory: Callable,
                  progress=lambda _: None, cancelled=lambda: False) -> StrategyResult:
     report = {}
@@ -276,172 +227,10 @@ def run_pipeline(config, memory: ChatMemory, packet: dict, router_factory: Calla
 def _save_report(memory, report):
     with memory.connect() as db:
         db.execute("INSERT INTO strategy_runs VALUES (?, ?, ?, ?)",
-                   (uuid.uuid4().hex, report["contact"], report["timestamp"],
+                   (report.get("run_id", uuid.uuid4().hex), report["contact"], report["timestamp"],
                     json.dumps(report, ensure_ascii=False)))
 
 
 def _run_pipeline(config, memory, packet, router_factory, progress, cancelled, report):
-    settings = StrategySettings(**packet["strategy_settings"])
-    settings.validate()
-    _tables(memory)
-    with memory.connect() as db:
-        row = db.execute("SELECT data FROM strategy_state WHERE contact=?", (packet["contact"],)).fetchone()
-    state = ConversationState.model_validate_json(row[0]) if row else ConversationState(match_id=packet["contact"])
-    # Repeated generations are not actual re-engagement. Recompute milestones
-    # from observed messages rather than advancing on the previous draft run.
-    match, ctx, stage = plan(config, packet, settings)
-    state.stage, state.message_count = stage, len(match.messages)
-    # Only archived real self messages feed repetition / pacing; never drafts.
-    state.outgoing_history = [normalize_text(m.text) for m in _messages(packet, current=False) if m.from_me][-10:]
-    report.update(contact=packet["contact"], settings=asdict(settings), stage=stage.value,
-                  status="blocked", steps=[], reason="", modifiers=[], quality=None,
-                  timestamp=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"))
-    report.update(judgment_details(match, ctx))
-    if settings.stage != "auto":
-        report["stage_reason"] = "交流阶段由你手动指定；语气与邀约仍按真实消息单独判断。"
-    # Selection, drafting and every review see the same evidence and lifecycle.
-    # This does not persist predictions as facts or add them to chat history.
-    packet = {**packet, "conversation_judgment": {
-        **{k: report[k] for k in ("tone", "invitation", "stage_reason")},
-        "relationship": "未通过本次自动规则确认；以双方已确认事实为准",
-        "scope": "仅本次预览中的真实消息；目标和生成草稿不计入邀约",
-    }}
-
-    def check():
-        if cancelled():
-            raise HistoryError("已停止后续策略步骤；当前模型调用结束后不再继续。")
-
-    def step(text):
-        check()
-        report["steps"].append(text)
-        progress(text)
-
-    def finish(text="", notice=""):
-        check()
-        report["notice"] = notice
-        state.last_skill = report.get("skill")
-        state.last_decision_reason = report["reason"]
-        state.touch()
-        with memory.connect() as db:
-            db.execute("INSERT OR REPLACE INTO strategy_state VALUES (?, ?)",
-                       (packet["contact"], state.model_dump_json()))
-        _save_report(memory, report)
-        return StrategyResult(text, report)
-
-    step("读取已保存目标与双方资料，完成交流阶段判断")
-    guard = SafetyGuard(config.safety)
-    preflight = guard.check_message("", ctx)
-    if preflight.blocked or stage == ConversationStage.CLOSED:
-        step("对方边界检查：暂停推进")
-        return finish(notice="对方表达拒绝、不适或触发边界检查，建议停止推进。" if preflight.blocked
-                      else "你已将此对象设为停止推进。")
-    if settings.action == "proactive":
-        mine = [m for m in match.messages if m.from_me]
-        last = match.last_message
-        trailing = 0
-        for msg in reversed(match.messages):
-            if not msg.from_me:
-                break
-            trailing += 1
-        state.last_sent_at = mine[-1].sent_at if mine else None
-        # Local archive can be incomplete. An empty archive has no proven sent action.
-        daily = sum(1 for m in mine if m.sent_at and
-                    (datetime.now(timezone.utc) - m.sent_at).total_seconds() < 86400)
-        pace = guard.check_pacing(
-            cooldown_remaining=state.cooldown_remaining(config.pacing.cooldown_hours),
-            followups_without_reply=trailing,
-            daily_budget_left=max(0, config.pacing.max_daily_actions - daily))
-        if pace.blocked or (last and last.from_me and config.pacing.never_double_text
-                            and (ctx.days_since_last or 0) < config.pacing.reengage_after_days):
-            step("主动跟进节奏检查：暂不追发")
-            return finish(notice="已保存记录显示仍在等待回应、冷却中或追发过多，暂不建议再次主动联系。")
-        step("主动跟进节奏检查通过（仅按已保存记录计算）")
-    else:
-        step("回复来信模式：不把草稿生成次数计入已发送或追发次数")
-    engine = SkillsEngine()
-    step(f"加载原版 {len(engine)} 个技能，开始选择本次约会策略")
-    router = router_factory()
-    selection_router = PhaseRouter(router, packet, "selection", check)
-    selection = engine.select(ctx, router=selection_router if settings.skill == "auto" else None)
-    selection_router.require_success()
-    if settings.skill != "auto":
-        selection = SkillSelection(engine.get(settings.skill), engine.modifiers(), "由用户手动指定技能。")
-    elif ((selection.primary.name == "flirting" and not ctx.playful)
-          or (selection.primary.name in {"proposing-a-date", "number-exchange"}
-              and not ctx.ready_for_date)):
-        selection = SkillSelection(engine.get("rapport-building"), engine.modifiers(),
-                                   "没有足够的当前好感表达或有效见面线索，先自然回应。")
-    # Existing WeChat contact already has a messaging channel. No gratuitous number request.
-    if settings.skill == "auto" and selection.primary.name == "number-exchange":
-        selection = SkillSelection(engine.get("proposing-a-date"), engine.modifiers(),
-                                   "已在微信交流，优先讨论见面安排，不重复索取联系方式。")
-    observations = ["当前有新来信" if settings.action == "reply" else "由你主动开启或跟进"]
-    if ctx.banter:
-        observations.append("来信有调侃表达")
-    elif ctx.playful:
-        observations.append("来信语气轻松积极")
-    if ctx.sentiment == "negative":
-        observations.append("来信表达低落或暂不想聊")
-    if ctx.their_asked_question:
-        observations.append("对方提出了问题")
-    if ctx.ready_for_date:
-        observations.append("可见消息中有对方提出或双方接受的有效见面安排")
-    observations.append(f"本次可见对话 {ctx.num_messages} 条")
-    if selection.decided_by == "llm-tiebreak":
-        observations.append("模糊情况由模型在候选技能中择优")
-    report.update(skill=selection.primary.name, modifiers=[s.name for s in selection.modifiers],
-                  confidence=selection.confidence,
-                  engine_reason=selection.reason, selected_by=selection.decided_by,
-                  reason=("；".join(observations) + "。" if settings.skill == "auto"
-                          else "由你手动指定；拒绝与边界检查仍优先。"))
-    step("选用：" + SKILL_LABELS[selection.primary.name] + "；已叠加意图匹配、本人口吻和边界技能")
-    own = [m.text for m in match.messages if m.from_me]
-    custom = packet["my_persona"]
-    persona = analyze_persona(IngestResult(chat_messages=own), voice=custom.get("voice", ""))
-    persona.tone = custom.get("voice") or persona.tone
-    persona.summary = custom.get("personality") or persona.summary
-    # Explicit examples are voice examples, never asserted to be sent messages.
-    guidance = selection.combined_playbook() + "\n用户手动设定优先：\n" + json.dumps(custom, ensure_ascii=False)
-    report["persona_samples"] = len(own)
-    packet = {**packet, "strategy_plan": {"stage": stage.value, "skill": selection.primary.name,
-                                          "intent": settings.intent, "looking_for": settings.intent,
-                                          "action": settings.action}}
-    draft_router = PhaseRouter(router, packet, "draft", check)
-    style_router = PhaseRouter(router, packet, "style", check)
-    quality_router = PhaseRouter(router, packet, "quality", check)
-    safety_router = PhaseRouter(router, packet, "safety", check)
-    # Full reviews deliberately run for this UI even though Codex's raw router
-    # normally requests one call. No backend permission or tool setting changes.
-    feedback = ""
-    for attempt in range(config.quality.max_regenerations + 1):
-        step("生成初稿" if not attempt else f"按复审意见重新生成（第 {attempt} 次）")
-        draft = draft_router.chat(guidance, "结合所选技能和当前明确事实生成一条约会聊天回复。\n" + feedback,
-                                  max_tokens=600)
-        # Run deterministic safety before another model handles a bad draft.
-        local = guard.check_message(draft, ctx)
-        if local.blocked and local.severity == "hard":
-            step("草稿边界检查：未通过")
-            return finish(notice="草稿触发内容边界检查，已隐藏；请调整当前信息后重试。")
-        step("使用原版本人口吻改写模块")
-        draft = StyleTransfer(style_router, guidance).transfer(draft, persona)
-        style_router.require_success()
-        step("质量复审：检查重复、贴合来信、语气与事实归属")
-        quality = critique_message(draft, ctx=ctx, persona=persona, state=state,
-                                   skill=selection.primary.name, reference_text=ctx.their_last_text or "",
-                                   min_score=config.quality.min_score, router=quality_router)
-        quality_router.require_success()
-        report["quality"] = quality.score
-        step("使用原版安全模块复查最终草稿")
-        decision = SafetyGuard(config.safety, safety_router, guidance).check_message(draft, ctx)
-        safety_router.require_success()
-        # If deterministic quality failed, the original critic skips its model
-        # pass. This is still a failed review; regeneration handles it below.
-        if quality.passed and decision.allowed:
-            report["status"] = "passed"
-            step("质量与安全检查通过，等待人工核对")
-            return finish(draft)
-        if decision.blocked and decision.severity == "hard":
-            return finish(notice="最终草稿触发内容边界检查，已隐藏。")
-        feedback = "请修正：" + quality.feedback + "；" + "；".join(decision.reasons)
-    step("重写次数用尽，仍未通过复审")
-    return finish(notice="本次草稿未通过质量或边界复审，已隐藏；可调整资料、技能后重新生成。")
+    from .coach.pipeline import run_coach
+    return run_coach(config, memory, packet, router_factory, progress, cancelled, report)

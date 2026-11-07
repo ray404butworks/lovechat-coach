@@ -39,3 +39,9 @@ jobs:
 
       - name: Test (pytest)
         run: pytest -q
+
+      - name: Verify pinned coach references
+        run: python scripts/sync_coach_references.py --check
+
+      - name: Build installed coach package
+        run: python -m pip wheel . --no-deps --wheel-dir work/wheels

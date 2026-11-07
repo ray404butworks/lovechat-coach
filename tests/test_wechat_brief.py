@@ -2,6 +2,7 @@ import json
 import tkinter as tk
 
 import pytest
+from coach_support import answer
 
 from opendate.config import AppConfig
 from opendate.wechat_desktop import build_reply_context, context_preview, generate_reply
@@ -43,13 +44,9 @@ def test_actual_model_call_receives_latest_saved_facts_goal_and_style(tmp_path, 
     class FakeRouter:
         def chat(self, system, user, **kwargs):
             calls.append((system, json.loads(user)))
-            if "WORKFLOW_PHASE: selection" in system:
-                return '{"skill":"rapport-building"}'
-            if "WORKFLOW_PHASE: quality" in system:
-                return '{"score":0.9,"issues":[]}'
-            if "WORKFLOW_PHASE: safety" in system:
-                return '{"allowed":true,"reason":"符合上下文"}'
-            return "周六上午一起去看展？"
+            if "WORKFLOW_PHASE: review" in system:
+                return '{"allowed":true,"issues":[]}'
+            return json.dumps(answer(json.loads(user), "周六上午一起去看展？"), ensure_ascii=False)
     monkeypatch.setattr("opendate.wechat_desktop.make_router", lambda *_: FakeRouter())
     assert generate_reply(config, tmp_path, old_packet) == "周六上午一起去看展？"
     system, actual = calls[0]

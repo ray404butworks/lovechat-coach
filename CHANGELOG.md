@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Rebuild the WeChat desktop coaching workflow around goutoujunshi's emotion, evidence, decision, one-action composition and feedback architecture.
+- Add reply, analysis, expression review and one-turn rehearsal modes; replace the ten-skill desktop selector with scene routing and a current-question editor.
+- Package 43 pinned MIT references with provenance and hash verification. Load only three relevant documents per request.
+- Separate sendable text from internal coaching, validate evidence quotes and source IDs, and independently review the complete plan.
+- Add bounded, consent-gated relationship memory with five scopes, provenance, upsert, pause, revoke, per-contact undo and hard deletion. Model candidates require explicit review before saving.
+- Preserve v0.2 private settings, imported history, voice, identity mapping and the stage/invitation fixes. The legacy OpenDate CLI remains available.
+
 ### Fixed
 
 - Separate friendly tone and banter from explicit romantic signals in WeChat automatic stage and skill selection.
