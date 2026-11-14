@@ -45,8 +45,14 @@ def local_date(value: str | None) -> str:
     return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M")
 
 
+def compact_summary(value: str, limit: int) -> str:
+    """Keep multiline saved settings from displacing the reply editors."""
+    value = " ".join(value.split())
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
 class WeChatWindow:
-    def __init__(self, root: tk.Tk, project: Path):
+    def __init__(self, root: tk.Tk, project: Path, *, auto_connect=False):
         self.root = root
         self.project = project.resolve()
         self.config = load_config(self.project / "config.wechat.yaml")
@@ -56,6 +62,7 @@ class WeChatWindow:
         self.persona = load_persona(self.project, self.config)
         self.note_drafts: dict[str, str] = {}
         self.chat_drafts: dict[str, tuple[str, str, str]] = {}
+        self.reply_requests: dict[str, str] = {}
         self.brief_drafts: dict[str, ConversationBrief] = {}
         self.strategy_drafts: dict[str, StrategySettings] = {}
         self.window_choices: dict[str, dict] = {}
@@ -68,6 +75,12 @@ class WeChatWindow:
         self.packet: dict | None = None
         self.output_revision = ""
         self.reviewed_text = ""
+        self.auto_epoch = 0
+        self.auto_inflight = False
+        self.auto_window = None
+        self.last_auto_incoming = ""
+        self.pending_incoming = ""
+        self.auto_connect_requested = auto_connect
         root.title("恋聊教练 · LoveChat Coach")
         density = max(1.0, root.winfo_fpixels("1i") / 96)
         available_width = root.winfo_screenwidth()-round(80*density)
@@ -82,6 +95,9 @@ class WeChatWindow:
         self.refresh()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(100, self.poll)
+        self.root.after(6000, self.auto_tick)
+        if auto_connect:
+            self.root.after(500, self.connect_wechat)
 
     def _style(self):
         self.theme = NativeTheme(self.root)
@@ -134,35 +150,55 @@ class WeChatWindow:
             widget.configure(state="disabled")
 
     def _build(self):
-        outer = ttk.Frame(self.root, padding=(24, 18))
+        outer = ttk.Frame(self.root, padding=(20, 14))
         outer.pack(fill="both", expand=True)
         header = ttk.Frame(outer)
         header.pack(fill="x", pady=(0, 10))
         title_row = ttk.Frame(header)
         title_row.pack(fill="x")
         ttk.Label(title_row, text="恋聊教练", font=FONT_TITLE).pack(side="left")
+        self.button(title_row, "资料与设置", lambda: self.open_settings(1)).pack(side="right")
         self.theme_choice = tk.StringVar(value="夜间" if self.theme.dark else "暖纸")
         theme_picker = ttk.Combobox(title_row, textvariable=self.theme_choice, state="readonly",
                                    values=["暖纸", "夜间"], width=7)
-        theme_picker.pack(side="right")
+        theme_picker.pack(side="right", padx=12)
         theme_picker.bind("<<ComboboxSelected>>", self.change_theme)
-        ttk.Label(title_row, text="视觉主题", style="Muted.TLabel").pack(side="right", padx=8)
         self.identity_text = tk.StringVar()
-        ttk.Label(header, textvariable=self.identity_text,
-                  style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
         self.persona_text = tk.StringVar()
-        ttk.Label(header, textvariable=self.persona_text, wraplength=1080,
-                  style="Muted.TLabel").pack(anchor="w", pady=(4, 8))
         row = ttk.Frame(header)
-        row.pack(fill="x")
-        ttk.Label(row, text="聊天对象完整备注").pack(side="left")
+        row.pack(fill="x", pady=(12, 4))
+        ttk.Label(row, text="和谁聊").pack(side="left")
         self.target_var = tk.StringVar(value=self.contact)
         self.target_box = ttk.Combobox(row, textvariable=self.target_var, width=20)
         self.target_box.pack(side="left", padx=8)
-        self.button(row, "应用对象", self.apply_contact).pack(side="left")
-        self.button(row, "编辑我的人设与风格", lambda: self.tabs.select(3)).pack(side="left", padx=8)
-        self.button(row, "双方信息与目标", lambda: self.tabs.select(4)).pack(side="left")
-        row = ttk.Frame(header)
+        self.target_box.bind("<<ComboboxSelected>>", lambda _: self.apply_contact())
+        self.target_box.bind("<Return>", lambda _: self.apply_contact())
+        self.button(row, "切换对象", self.apply_contact).pack(side="left")
+        self.button(row, "人设与目标", lambda: self.open_settings(4)).pack(side="right")
+        self.settings_window = tk.Toplevel(self.root)
+        self.settings_window.title("恋聊教练 · 资料与设置")
+        density = max(1, self.root.winfo_fpixels("1i") / 96)
+        self.settings_window.geometry(
+            f"{min(round(1160*density), self.root.winfo_screenwidth()-round(80*density))}x"
+            f"{min(round(760*density), self.root.winfo_screenheight()-round(100*density))}")
+        self.settings_window.withdraw()
+        self.settings_window.protocol("WM_DELETE_WINDOW", self.settings_window.withdraw)
+        settings_header = ttk.Frame(self.settings_window, padding=12)
+        settings_header.pack(fill="x")
+        ttk.Label(settings_header, text="资料与设置", font=FONT_SECTION).pack(side="left")
+        self.button(settings_header, "返回起草", self.settings_window.withdraw).pack(side="right")
+        self.tabs = ttk.Notebook(self.settings_window, takefocus=True)
+        self.tabs.enable_traversal()
+        self.tabs.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        reply = ttk.Frame(outer)
+        reply.pack(fill="both", expand=True)
+        pages = []
+        for title in ("聊天记录", "重要记忆", "我的说话风格", "对方与聊天目标", "AI 与微信接入", "详细分析"):
+            host = ScrollPanel(self.tabs)
+            self.tabs.add(host, text=title)
+            pages.append(host.body)
+        history, notes, profile, brief, access, strategy = pages
+        row = ttk.Frame(access)
         row.pack(fill="x", pady=(8, 0))
         ttk.Label(row, text="指定微信窗口").pack(side="left")
         self.window_var = tk.StringVar(value="自动（单个微信主窗口）")
@@ -174,71 +210,80 @@ class WeChatWindow:
         self.layout_var = tk.StringVar(value="微信主窗口")
         ttk.Combobox(row, textvariable=self.layout_var, state="readonly", width=18,
                      values=["微信主窗口", "独立聊天窗口"]).pack(side="left", padx=8)
-        self.tabs = ttk.Notebook(outer, takefocus=True)
-        self.tabs.enable_traversal()
-        self.tabs.pack(fill="both", expand=True)
-        reply = ttk.Frame(self.tabs, padding=16)
-        self.tabs.add(reply, text="回复与军师")
-        pages = []
-        for title in ("聊天历史", "长期记忆", "我的人设与风格", "双方信息与目标", "接入与说明", "军师方案"):
-            host = ScrollPanel(self.tabs)
-            self.tabs.add(host, text=title)
-            pages.append(host.body)
-        history, notes, profile, brief, access, strategy = pages
+        self.consent = tk.BooleanVar(value=False)
         self._build_strategy(strategy)
 
         self.stats_text = tk.StringVar()
-        ttk.Label(reply, textvariable=self.stats_text, style="Muted.TLabel").pack(anchor="w")
+        context_row = ttk.Frame(reply)
+        context_row.pack(fill="x")
+        ttk.Label(context_row, textvariable=self.stats_text, style="Muted.TLabel").pack(side="left")
         self.goal_text = tk.StringVar()
-        ttk.Label(reply, textvariable=self.goal_text, wraplength=1040,
-                  style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
+        self.button(context_row, "查看本次使用的资料", self.preview).pack(side="right")
+        connection = ttk.Frame(reply)
+        connection.pack(fill="x", pady=(4, 0))
+        self.auto_enabled = tk.BooleanVar(value=self.auto_connect_requested)
+        ttk.Checkbutton(connection, text="自动读取微信来信", variable=self.auto_enabled,
+                        command=self.toggle_auto_read).pack(side="left")
+        self.button(connection, "重新连接", self.connect_wechat).pack(side="right")
+        self.auto_status = tk.StringVar(value="连接后自动填入来信；识别结果请先核对。")
+        connection_hint = ttk.Label(reply, textvariable=self.auto_status, style="Muted.TLabel", wraplength=1000)
+        connection_hint.pack(anchor="w", pady=(0, 4))
+        reply.bind("<Configure>", lambda event: connection_hint.configure(wraplength=max(1,event.width)))
+        goal_label = ttk.Label(header, textvariable=self.goal_text, style="Muted.TLabel")
+        goal_label.pack(anchor="w", pady=(4, 0))
+        header.bind("<Configure>", lambda event: goal_label.configure(wraplength=max(1,event.width)))
         self.reply_split = ReplySplit(reply)
-        self.reply_split.pack(fill="both", expand=True, pady=(14, 0))
-        incoming_panel = self.reply_split.left
-        outgoing_panel = self.reply_split.right
-        incoming_footer = ttk.Frame(incoming_panel)
-        incoming_footer.pack(side="bottom", fill="x")
-        outgoing_footer = ttk.Frame(outgoing_panel)
-        outgoing_footer.pack(side="bottom", fill="x")
-        ttk.Label(incoming_panel, text="对方的来信", style="Section.TLabel").pack(anchor="w", pady=(0, 8))
-        actions = ttk.Frame(incoming_panel)
-        actions.pack(fill="x", pady=(12, 10))
-        self.button(actions, "读取当前微信画面", self.ocr).pack(side="left")
-        self.button(actions, "导入历史记录", self.import_history).pack(side="left", padx=8)
-        self.button(incoming_panel, "使用最近一条对方消息", self.use_latest).pack(anchor="w", pady=(0, 8))
-        incoming_hint = ttk.Label(incoming_panel, text="对方这次说了什么？（可直接粘贴，也可从画面中选择）",
+        self.reply_split.pack(fill="both", expand=True, pady=(8, 0))
+        incoming_panel = self.reply_split.left.body
+        outgoing_panel = self.reply_split.right.body
+        incoming_footer = self.reply_split.left.footer
+        outgoing_footer = self.reply_split.right.footer
+        ttk.Label(incoming_panel, text="对方发来的消息", style="Section.TLabel").pack(anchor="w", pady=(0, 8))
+        incoming_hint = ttk.Label(incoming_panel, text="微信来信自动填入，核对后再生成；也可直接粘贴。",
                                   wraplength=900, style="Muted.TLabel")
         incoming_hint.pack(anchor="w")
         incoming_panel.bind("<Configure>", lambda event: incoming_hint.configure(wraplength=event.width))
-        self.incoming = self.text(incoming_panel, height=4)
+        self.incoming = self.text(incoming_panel, height=3)
         self.incoming.pack(fill="both", expand=True, pady=(8, 8))
         self.incoming.bind("<<Modified>>", self.changed)
-        row = ttk.Frame(incoming_footer)
-        row.pack(fill="x")
-        self.button(row, "预览本次上下文", self.preview).pack(side="left")
-        self.button(row, "将这条消息存入历史", self.remember_incoming).pack(side="left", padx=8)
-        ttk.Label(incoming_footer, text="完整流程会多次调用所选 AI，使用当前消息、选中的历史与已保存设定，耗时会增加。",
-                  wraplength=700, style="Muted.TLabel").pack(anchor="w", pady=(12, 5))
-        self.consent = tk.BooleanVar(value=False)
+        ttk.Label(incoming_panel, text="我的想法 / 希望怎么回", style="Section.TLabel").pack(anchor="w", pady=(8, 4))
+        request_hint = ttk.Label(incoming_panel, text="写想说的意思、语气要求或草稿。例如：轻松一点，先关心她。",
+                                 wraplength=450, style="Muted.TLabel")
+        request_hint.pack(anchor="w")
+        incoming_panel.bind("<Configure>", lambda event: (
+            incoming_hint.configure(wraplength=max(1, event.width-32)),
+            request_hint.configure(wraplength=max(1, event.width-32))))
+        self.reply_request = self.text(incoming_panel, height=3)
+        self.reply_request.pack(fill="x", pady=(6, 8))
+        actions = ttk.Frame(incoming_panel)
+        actions.pack(fill="x", pady=(4, 8))
+        self.button(actions, "手动选消息", self.ocr).pack(side="left")
+        self.new_incoming_button = self.button(actions, "使用新来信", self.use_pending_incoming)
+        self.new_incoming_button.pack(side="left", padx=8)
+        self.new_incoming_button.configure(state="disabled")
+        ttk.Label(incoming_footer, text="已有的人设、目标和相关历史会自动带入。", style="Muted.TLabel").pack(anchor="w")
         ttk.Checkbutton(incoming_footer, text="我同意使用这些聊天内容生成回复", variable=self.consent).pack(anchor="w")
+        self.generate_button = self.button(incoming_footer, "生成回复建议", self.generate_from_home, primary=True)
+        self.generate_button.pack(fill="x", pady=(6, 0))
         outgoing_head = ttk.Frame(outgoing_panel)
         outgoing_head.pack(fill="x", pady=(0, 8))
-        ttk.Label(outgoing_head, text="我的回复建议", style="Section.TLabel").pack(side="left")
-        self.button(outgoing_head, "选择模式 / 当前问题", lambda: self.tabs.select(6)).pack(side="right")
-        self.reply = self.text(outgoing_panel, height=5)
+        ttk.Label(outgoing_head, text="可以这样回", style="Section.TLabel").pack(anchor="w")
+        self.strategy_summary = tk.StringVar(value="填写左侧内容，点击“生成回复建议”。生成后可在这里直接修改。")
+        summary_label = ttk.Label(outgoing_panel, textvariable=self.strategy_summary, wraplength=450,
+                                 style="Muted.TLabel")
+        summary_label.pack(anchor="w", pady=(0, 10))
+        self.reply = self.text(outgoing_panel, height=6)
         self.reply.pack(fill="both", expand=True)
-        ttk.Label(outgoing_panel, text="军师首选与下一步", style="Section.TLabel").pack(anchor="w", pady=(10, 5))
-        self.coach_advice = self.text(outgoing_panel, height=7, readonly=True)
+        ttk.Label(outgoing_panel, text="为什么这样回 / 下一步", style="Section.TLabel").pack(anchor="w", pady=(10, 5))
+        self.coach_advice = self.text(outgoing_panel, height=4, readonly=True)
         self.coach_advice.pack(fill="both", expand=True)
         row = ttk.Frame(outgoing_footer)
         row.pack(fill="x", pady=(12, 8))
-        self.button(row, "生成本轮方案", self.generate, primary=True).pack(side="left")
-        self.button(row, "复制回复", self.copy_reply).pack(side="left", padx=8)
+        self.button(row, "复制回复", self.copy_reply, primary=True).pack(side="left")
+        self.button(row, "先帮我分析", self.analyze_from_home).pack(side="left", padx=8)
         ttk.Label(outgoing_footer, text="草稿可修改，复制后自行发送", style="Muted.TLabel").pack(anchor="w")
         self.reply.bind("<<Modified>>", self.reply_changed)
-        self.strategy_summary = tk.StringVar(value="军师流程：分清事实与推测 → 一个主动作 → 后续分支与停止条件 → 复审")
-        ttk.Label(outgoing_footer, textvariable=self.strategy_summary, wraplength=800,
-                  style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+        outgoing_panel.bind("<Configure>", lambda event: summary_label.configure(wraplength=max(1, event.width-32)))
 
         bar = ttk.Frame(history)
         bar.pack(fill="x", pady=(0, 10))
@@ -315,14 +360,152 @@ class WeChatWindow:
         self.button(row, "检查模型接入", self.check_login).pack(side="left", padx=8)
         self.button(row, "重新打开配置引导", self.configure_model).pack(side="left")
         self.button(row, "查看 GitHub 来源", self.open_source).pack(side="left")
-        self.status = tk.StringVar(value="准备好了。可以读取当前画面，或先导入历史。")
+        self.status = tk.StringVar(value="准备好了。填写来信或自己的想法，勾选同意后生成。")
         footer = ttk.Frame(outer)
-        footer.pack(side="bottom", fill="x", pady=(10, 0), before=self.tabs)
-        ttk.Label(footer, textvariable=self.status, wraplength=870,
-                  style="Muted.TLabel").pack(side="left", fill="x", expand=True)
+        footer.pack(side="bottom", fill="x", pady=(10, 0), before=reply)
+        self.status_label = ttk.Label(footer, textvariable=self.status, wraplength=870,
+                                     style="Muted.TLabel")
+        self.status_label.pack(side="left", fill="x", expand=True)
         self.stop_button = ttk.Button(footer, text="停止后续整理", command=self.cancelled.set,
                                       state="disabled")
         self.stop_button.pack(side="right")
+        footer.bind("<Configure>", lambda event: self.status_label.configure(
+            wraplength=max(1, event.width-self.stop_button.winfo_reqwidth()-16)))
+        previous = latest_report(self.memory, self.contact)
+        if previous.get("status") == "blocked":
+            self.strategy_summary.set("上次没有生成：" + previous.get("notice", "请查看详细分析。"))
+            self.put(self.coach_advice, previous.get("notice", "") + "\n\n可以点击“先帮我分析”了解下一步。", readonly=True)
+
+    def open_settings(self, page=1):
+        self.tabs.select(page-1)
+        self.settings_window.deiconify()
+        self.settings_window.lift()
+
+    def toggle_auto_read(self):
+        if self.auto_enabled.get():
+            self.connect_wechat()
+        else:
+            self.auto_epoch += 1
+            self.auto_status.set("自动读取已关闭，可以直接粘贴或手动选消息。")
+
+    def connect_wechat(self):
+        if self.auto_inflight or self.closed:
+            return
+        self.config.wechat.validate_identity()
+        self.auto_enabled.set(True)
+        self.auto_epoch += 1
+        self.auto_window = None
+        self.auto_status.set("正在连接电脑微信。请在微信打开当前所选对象的私聊…")
+        self.start_auto_read(reconnect=True)
+
+    def auto_tick(self):
+        if self.closed:
+            return
+        if self.auto_enabled.get() and not self.auto_inflight and not self.busy:
+            self.start_auto_read(reconnect=self.auto_window is None)
+        self.root.after(6000, self.auto_tick)
+
+    def start_auto_read(self, *, reconnect=False):
+        if self.auto_inflight or self.closed:
+            return
+        from .wechat_live import open_wechat, read_incoming
+        self.config.wechat.validate_identity()
+        self.auto_inflight = True
+        epoch, contact = self.auto_epoch, self.contact
+        selected = self.auto_window
+        explicit = self.window_choices.get(self.window_var.get())
+        explicit_layout = "detached" if self.layout_var.get() == "独立聊天窗口" else "main"
+        def work():
+            try:
+                if reconnect:
+                    window = open_wechat(contact, window_handle=explicit["handle"]) if explicit else open_wechat(contact)
+                    if explicit:
+                        window["layout"] = explicit_layout
+                else:
+                    window = selected
+                value = read_incoming(contact, self.project / "work/ocr",
+                                      window_handle=window["handle"], layout=window["layout"])
+                self.events.put(("wechat", (epoch, contact), (window, value, None)))
+            except Exception as exc:
+                self.events.put(("wechat", (epoch, contact), (None, "", str(exc))))
+        threading.Thread(target=work, daemon=True).start()
+
+    def auto_read_done(self, token, result):
+        self.auto_inflight = False
+        if token != (self.auto_epoch, self.contact) or not self.auto_enabled.get():
+            return
+        window, value, error = result
+        if error:
+            self.auto_window = None
+            self.auto_enabled.set(False)
+            self.auto_status.set("自动读取已暂停：" + error)
+            return
+        self.auto_window = window
+        if not value:
+            self.pending_incoming = ""
+            self.new_incoming_button.configure(state="disabled")
+            current = self.incoming.get("1.0", "end").strip()
+            if self.last_auto_incoming and current == self.last_auto_incoming and not self.busy:
+                self.put(self.incoming, "")
+                self.last_auto_incoming = ""
+                self.consent.set(False)
+                self.packet = None
+            self.auto_status.set("已连接当前对象。画面里没有新的待回复文字；图片和语音请手动处理。")
+            return
+        current = self.incoming.get("1.0", "end").strip()
+        if value == self.last_auto_incoming:
+            return
+        if self.busy or current and current != self.last_auto_incoming:
+            self.pending_incoming = value
+            self.new_incoming_button.configure(state="normal")
+            self.auto_status.set("读到了新的来信候选。当前内容正在编辑，点击“使用新来信”后再核对。")
+            return
+        self.apply_auto_incoming(value)
+
+    def apply_auto_incoming(self, value):
+        self.put(self.incoming, value)
+        self.last_auto_incoming = value
+        self.pending_incoming = ""
+        self.new_incoming_button.configure(state="disabled")
+        self.consent.set(False)
+        self.packet = None
+        self.auto_status.set("已自动填入当前对象的可见来信候选。请核对文字，再勾选同意并生成。")
+
+    def use_pending_incoming(self):
+        if self.pending_incoming and not self.busy:
+            self.apply_auto_incoming(self.pending_incoming)
+
+    def generate_from_home(self):
+        if self.busy:
+            return
+        if self.target_var.get().strip() != self.contact:
+            self.status.set("请先点击“切换对象”，确认这次和谁聊。")
+            return
+        incoming = self.incoming.get("1.0", "end").strip()
+        request = self.reply_request.get("1.0", "end").strip()
+        if not incoming and not request:
+            self.strategy_summary.set("还缺内容：粘贴对方的消息，或在“我的想法”里写下想说的话。")
+            self.status.set(self.strategy_summary.get())
+            self.incoming.focus_set()
+            return
+        self.strategy_vars["mode"].set(MODES["reply"])
+        self.strategy_vars["action"].set(ACTIONS["reply" if incoming else "proactive"])
+        if self.save_strategy():
+            self.generate()
+
+    def analyze_from_home(self):
+        if self.busy:
+            return
+        if self.target_var.get().strip() != self.contact:
+            self.status.set("请先点击“切换对象”，确认分析对象。")
+            return
+        if not (self.incoming.get("1.0", "end").strip() or self.reply_request.get("1.0", "end").strip()
+                or self.coach_question.get("1.0", "end").strip()):
+            self.strategy_summary.set("先写下你想分析的情况，再点击“先帮我分析”。")
+            return
+        self.strategy_vars["mode"].set(MODES["coach"])
+        if self.save_strategy():
+            self.generate()
 
     def changed(self, _event=None):
         if self.incoming.edit_modified():
@@ -361,9 +544,15 @@ class WeChatWindow:
         row = ttk.Frame(panel.action_area)
         row.pack(fill="x", pady=(12, 8))
         self.button(row, "保存模式与问题", self.save_strategy, primary=True).pack(side="left")
+        self.button(row, "保存并生成方案", self.save_and_generate).pack(side="left", padx=8)
         self.button(row, "查看当前场景的方法", self.show_skill_library).pack(side="left", padx=8)
         self.button(row, "核对并保存本轮档案", self.save_coach_candidates).pack(side="left")
-        self.strategy_notice = tk.StringVar(value="切换模式或修改问题后请保存。精简档案候选不会在生成时自动保存。")
+        ttk.Checkbutton(panel.action_area, text="我同意使用这些聊天内容生成回复",
+                        variable=self.consent).pack(anchor="w")
+        previous_report = latest_report(self.memory, self.contact)
+        notice = previous_report.get("notice", "") if previous_report.get("status") == "blocked" else ""
+        self.strategy_notice = tk.StringVar(value=("上次暂停原因：" + notice) if notice else
+            "保存只更新设置。点击“保存并生成方案”才会开始生成；精简档案候选不会自动保存。")
         ttk.Label(panel.action_area, textvariable=self.strategy_notice, wraplength=1040,
                   style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
         self.strategy_report = self.text(panel, height=15, readonly=True)
@@ -384,14 +573,22 @@ class WeChatWindow:
         self.put(self.coach_question, settings.question)
 
     def save_strategy(self):
+        if self.busy:
+            return False
         try:
             save_strategy(self.memory, self.contact, self.editing_strategy())
         except (ValueError, HistoryError, OSError) as exc:
             messagebox.showerror("策略未保存", str(exc), parent=self.root)
-            return
+            return False
         self.strategy_notice.set("已保存。本轮方案会使用所选模式、场景和当前问题。")
         self.packet = None
         self.status.set("当前对象的军师模式与问题已保存。")
+        return True
+
+    def save_and_generate(self):
+        if self.save_strategy():
+            self.settings_window.withdraw()
+            self.generate()
 
     def show_skill_library(self):
         from .coach.knowledge import route
@@ -587,16 +784,23 @@ class WeChatWindow:
         self.note_drafts[previous] = self.notes.get("1.0", "end").strip()
         self.chat_drafts[previous] = (self.incoming.get("1.0", "end").strip(),
                                      self.reply.get("1.0", "end").strip(), self.output_revision)
+        self.reply_requests[previous] = self.reply_request.get("1.0", "end").strip()
         self.config, self.persona = updated, persona
         self.contact, self.my_name = updated.wechat.contact, updated.wechat.my_name
         self.target_var.set(self.contact)
         self.name_var.set(self.my_name)
         if previous != self.contact:
+            self.auto_epoch += 1
+            self.auto_window = None
+            self.last_auto_incoming = ""
+            self.pending_incoming = ""
+            self.new_incoming_button.configure(state="disabled")
+            self.auto_status.set("已切换对象。请在微信打开对应私聊，再点“重新连接”。")
             self.reviewed_text = ""
             self.show_strategy(self.strategy_drafts.get(self.contact, load_strategy(self.memory, self.contact)))
             self.strategy_notice.set("当前对象的策略独立保存；未保存选择仍留在本窗口。")
             self.put(self.strategy_report, report_text(latest_report(self.memory, self.contact)), readonly=True)
-            self.strategy_summary.set("已切换对象，请在军师方案页核对当前设置。")
+            self.strategy_summary.set("已切换聊天对象。填写来信或自己的想法，然后生成。")
             self.put(self.coach_advice, render(latest_report(self.memory, self.contact).get("answer", {})), readonly=True)
             self.refresh_coach_memory_status()
             self.show_brief(self.brief_drafts.get(self.contact, self.memory.brief(self.contact)))
@@ -605,6 +809,7 @@ class WeChatWindow:
             incoming, reply, revision = self.chat_drafts.get(self.contact, ("", "", ""))
             self.put(self.incoming, incoming)
             self.put(self.reply, reply)
+            self.put(self.reply_request, self.reply_requests.get(self.contact, ""))
             self.output_revision = revision
             self.consent.set(False)
             self.search.set("")
@@ -633,19 +838,20 @@ class WeChatWindow:
     def window_selected(self, _event=None):
         choice = self.window_choices.get(self.window_var.get())
         self.layout_var.set("独立聊天窗口" if choice and choice["title"] == self.contact else "微信主窗口")
+        self.auto_epoch += 1
+        self.auto_window = None
 
     def refresh(self):
         self.identity_text.set(f"当前聊天：{self.contact}   /   我：{self.my_name}   /   AI：{self.config.llm.provider}")
-        self.persona_text.set(f"我的人设：{self.persona.personality.strip()[:70] or '尚未填写'}"
-                              f"   ｜   聊天风格：{self.persona.voice.strip()[:90]}")
+        self.persona_text.set(f"我的人设：{compact_summary(self.persona.personality, 28) or '尚未填写'}"
+                              f"   ｜   风格：{compact_summary(self.persona.voice, 28)}")
         self.target_box.configure(values=sorted({self.contact, *self.memory.contacts()}))
         self.my_info_title.set(f"我的信息 · {self.my_name}")
         self.peer_info_title.set(f"对方的信息 · {self.contact}")
         goal = self.memory.brief(self.contact).goal
-        self.goal_text.set(f"当前最终目标：{goal[:90] if goal else '未设置（在“双方信息与目标”页编辑）'}")
-        count, first, last = self.memory.stats(self.contact)
-        self.stats_text.set(f"本地已记住 {count} 条文字  ·  {local_date(first)} → {local_date(last)}"
-                            "  ·  全部微信历史覆盖：未验证")
+        self.goal_text.set(f"当前最终目标：{compact_summary(goal, 45) if goal else '未设置（在“双方信息与目标”页编辑）'}")
+        count, _, _ = self.memory.stats(self.contact)
+        self.stats_text.set(f"已存 {count} 条本地记录 · 相关历史自动选取 · AI：{self.config.llm.provider}")
         source = self.memory.source(self.contact)
         self.source_text.set(f"已绑定导出文件：{source[0]}\n生成前会同步文件更新；不直接监听微信数据库。"
                              if source else "尚未绑定历史文件。当前画面与手动保存的消息也可积累为本地记忆。")
@@ -683,17 +889,22 @@ class WeChatWindow:
         try:
             while True:
                 kind, callback, value = self.events.get_nowait()
+                if kind == "wechat":
+                    self.auto_read_done(callback, value)
+                    continue
                 if kind == "progress":
                     self.status.set(value)
                     continue
                 self.busy = False
                 for control in self.controls:
                     control.configure(state="normal")
+                self.new_incoming_button.configure(state="normal" if self.pending_incoming else "disabled")
                 self.stop_button.configure(state="disabled")
                 if kind == "error":
-                    self.status.set("这一步未完成，详情见提示。")
+                    self.status.set("未完成：" + value)
                     self.put(self.strategy_report, report_text(latest_report(self.memory, self.contact)), readonly=True)
-                    self.strategy_summary.set("当前操作未完成，请查看提示与策略页中的执行记录。")
+                    self.strategy_summary.set("未完成：" + value)
+                    self.put(self.coach_advice, value, readonly=True)
                     messagebox.showerror("未完成", value, parent=self.root)
                 else:
                     try:
@@ -1004,7 +1215,8 @@ class WeChatWindow:
     def build_packet(self):
         self.memory.sync(self.contact, self.my_name)
         return build_reply_context(self.config, self.project, self.memory,
-                                   self.incoming.get("1.0", "end").strip())
+                                   self.incoming.get("1.0", "end").strip(),
+                                   reply_request=self.reply_request.get("1.0", "end").strip())
 
     def preview(self):
         try:
@@ -1017,13 +1229,19 @@ class WeChatWindow:
         self.status.set("已展示实际上下文。近期聊天和旧记录会按预算选取，完整历史留在本地。")
 
     def generate(self):
+        if self.busy:
+            return
         if not self.consent.get():
+            self.strategy_summary.set("还差一步：勾选左侧“我同意使用这些聊天内容生成回复”，再点击生成。")
+            self.status.set(self.strategy_summary.get())
             messagebox.showinfo("使用聊天内容", "请勾选使用聊天内容生成回复，或先点预览查看具体内容。", parent=self.root)
             return
         try:
             # Freeze exactly the current input; background workers never read Tk widgets.
             packet = self.build_packet()
         except (HistoryError, OSError) as exc:
+            self.strategy_summary.set("未能开始：" + str(exc))
+            self.status.set(self.strategy_summary.get())
             messagebox.showerror("无法生成", str(exc), parent=self.root)
             return
         revision = self.incoming.get("1.0", "end").strip()
@@ -1031,7 +1249,7 @@ class WeChatWindow:
         self.put(self.reply, "")
         self.put(self.strategy_report, "正在生成本轮军师方案，尚未通过复审。", readonly=True)
         self.put(self.coach_advice, "正在分清事实、推测与未知…", readonly=True)
-        self.strategy_summary.set("正在编排本轮主动作、反馈分支与停止条件…")
+        self.strategy_summary.set("正在生成，请稍候…会先分析，再检查回复；下方会显示具体进度。")
         self.status.set("AI 正在结合本地记忆生成回复，通常需要等待一会儿…")
         def done(value):
             self.reviewed_text = value.text
@@ -1040,11 +1258,16 @@ class WeChatWindow:
             self.put(self.coach_advice, render(value.report.get("answer", {}),
                                              value.report.get("evidence_sources", {})), readonly=True)
             if value.blocked:
-                self.strategy_summary.set("本次已暂停：" + value.report.get("notice", "请查看策略页。"))
-                self.status.set("本次未给出通过复审的方案，请在军师方案页查看原因。")
-                self.tabs.select(6)
+                notice = value.report.get("notice") or "方案未通过复审，请补充信息后重试。"
+                self.strategy_summary.set("本次已暂停：" + notice)
+                self.strategy_notice.set("本次暂停原因：" + notice)
+                self.put(self.coach_advice, "本次未生成回复\n\n" + notice, readonly=True)
+                self.status.set("本次未生成回复：" + notice)
+                messagebox.showinfo("本次未生成回复", notice +
+                    "\n\n点击首页“先帮我分析”查看下一步；若已有新来信，请先更新聊天记录。",
+                    parent=self.root)
                 return
-            self.strategy_summary.set("本轮主动作：" + value.report["answer"]["main_action"] + " · 证据与安全复审通过，仍需本人核对")
+            self.strategy_summary.set("已生成，可直接修改后复制。" if value.text else "分析已完成，请查看下方建议。")
             self.output_revision = revision
             self.status.set("回复已生成，可修改后复制。" if self.incoming.get("1.0", "end").strip() == revision
                             else "回复基于生成开始时的消息；输入已改变，请核对或重新生成。")
@@ -1055,6 +1278,7 @@ class WeChatWindow:
     def copy_reply(self):
         value = self.reply.get("1.0", "end").strip()
         if not value:
+            self.status.set("还没有可复制的回复，请先填写左侧内容并生成回复建议。")
             return
         if self.incoming.get("1.0", "end").strip() != self.output_revision:
             if not messagebox.askyesno("内容已改变", "这条回复对应的是修改前的消息，仍要复制吗？", parent=self.root):
@@ -1087,7 +1311,7 @@ class WeChatWindow:
         def done(value):
             self.put(self.notes, value)
             self.notes_notice.set("这是自动整理的草稿，尚未保存。请核对日期、双方身份和事实后再保存。")
-            self.tabs.select(2)
+            self.open_settings(2)
             self.status.set("记忆草稿已完成，等待你核对。")
         self.run(lambda: draft_memory(self.config, self.project, self.memory,
                                      self.progress, self.cancelled.is_set), done)
@@ -1142,7 +1366,7 @@ def main():
     os.chdir(project)
     root = tk.Tk()
     def open_main():
-        window = WeChatWindow(root, project)
+        window = WeChatWindow(root, project, auto_connect=True)
         window.refresh_windows()
     try:
         if not (project / "config.wechat.yaml").exists() or "--setup" in sys.argv[2:]:

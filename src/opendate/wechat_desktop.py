@@ -34,14 +34,26 @@ def reply_settings(config: AppConfig, project: Path, memory: ChatMemory) -> dict
     }
 
 
-def build_reply_context(config: AppConfig, project: Path, memory: ChatMemory, incoming: str) -> dict:
+def _with_reply_request(settings: dict, reply_request: str) -> dict:
+    if not isinstance(reply_request, str) or len(reply_request) > 3000:
+        raise HistoryError("这次希望怎么回，请控制在 3000 字以内。")
+    if reply_request.strip():
+        question = "\n\n".join(filter(None, (settings["user_question"],
+                                              "【本轮回复要求 / 我的草稿】\n" + reply_request.strip())))
+        settings = {**settings, "user_question": question}
+    return settings
+
+
+def build_reply_context(config: AppConfig, project: Path, memory: ChatMemory, incoming: str,
+                        *, reply_request: str = "") -> dict:
     config.wechat.validate_identity()
-    settings = reply_settings(config, project, memory)
+    settings = _with_reply_request(reply_settings(config, project, memory), reply_request)
     reserve = len(json.dumps(settings, ensure_ascii=False)) + 100
     packet = memory.context(config.wechat.contact, incoming, budget=22000 - reserve,
                             allow_empty=(settings["strategy_settings"]["action"] == "proactive"
                                          or settings["strategy_settings"]["mode"] != "reply"))
     packet.update(settings)
+    packet["reply_request"] = reply_request
     if len(json.dumps(packet, ensure_ascii=False)) > 22000:
         raise HistoryError("本次上下文过长，请精简双方信息、长期记忆或当前消息。")
     return packet
@@ -69,6 +81,8 @@ def context_preview(packet: dict) -> str:
             lines.append(f"{record['timestamp']}　{speaker}\n{record['text']}")
         sections.append(f"【{label}】\n" + ("\n\n".join(lines) or "无"))
     sections.append("【对方本次来信】\n" + packet.get("message_to_reply", ""))
+    if packet.get("reply_request"):
+        sections.append("【本轮回复要求 / 我的草稿】\n" + packet["reply_request"])
     coverage = packet.get("coverage", {})
     sections.append(f"【覆盖范围】\n已存 {coverage.get('archived_text_messages', 0)} 条文字；"
                     f"本次使用 {coverage.get('included_messages', 0)} 条历史。\n{coverage.get('scope', '')}")
@@ -117,7 +131,8 @@ def generate_reply_with_strategy(config: AppConfig, project: Path, packet: dict,
     memory = ChatMemory(project / config.data_dir / "wechat-memory.sqlite3")
     # Refresh persistent settings for every actual request, including callers
     # outside the GUI. A stale preview must not override a newly saved goal.
-    packet = {**packet, **reply_settings(config, project, memory)}
+    packet = {**packet, **_with_reply_request(reply_settings(config, project, memory),
+                                             packet.get("reply_request", ""))}
     if len(json.dumps(packet, ensure_ascii=False)) > 22000:
         raise HistoryError("保存的信息已变化且超出上下文预算，请重新预览后生成。")
     if (packet["strategy_settings"]["mode"] == "reply"

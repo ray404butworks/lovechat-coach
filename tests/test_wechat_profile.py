@@ -81,7 +81,7 @@ def test_desktop_switch_preserves_unsaved_contact_drafts_and_applies_persona(tmp
         assert "冷静" in window.persona_text.get()
         assert window.build_packet()["my_persona"]["voice"] == "每次一两句，不用感叹号"
         assert len(json.dumps(window.build_packet(), ensure_ascii=False)) <= 22000
-        assert len(window.tabs.tabs()) == 7
+        assert len(window.tabs.tabs()) == 6
     finally:
         window.closed = True
         root.destroy()

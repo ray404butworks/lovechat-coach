@@ -13,8 +13,10 @@ class Contract(BaseModel):
 
 
 class Fact(Contract):
-    source_id: str = Field(min_length=1, max_length=200)
-    quote: str = Field(min_length=1, max_length=1000)
+    source_id: str = Field(min_length=1, max_length=200,
+                           description="evidence_sources中的准确键，不要使用来源名称或说话人代替")
+    quote: str = Field(min_length=1, max_length=1000,
+                       description="该来源text中逐字存在的连续原文，不加本人/对方标签、额外引号或任何解释")
 
 
 class Hypothesis(Contract):

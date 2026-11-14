@@ -31,6 +31,28 @@ def archive(memory, rows):
     memory.import_batch("对象甲", HistoryBatch("private", "甲", records), "test")
 
 
+def test_reply_request_reaches_generation_after_saved_settings_refresh(tmp_path, monkeypatch):
+    config, memory, router, _ = setup(tmp_path, monkeypatch)
+    request = "先关心她，语气轻松，不要连续追问。"
+    packet = build_reply_context(config, tmp_path, memory, "今天忙了一天。", reply_request=request)
+    save_settings(memory, "对象甲", StrategySettings(question="避免夸张表达"))
+    result = generate_reply_with_strategy(config, tmp_path, packet)
+    assert not result.blocked
+    assert request in packet["user_question"]
+    assert request in json.dumps(router.calls[0][2], ensure_ascii=False)
+    assert "避免夸张表达" in json.dumps(router.calls[0][2], ensure_ascii=False)
+    assert load_settings(memory, "对象甲").question == "避免夸张表达"
+    fresh_packet = build_reply_context(config, tmp_path, memory, "下班了。")
+    assert request not in json.dumps(fresh_packet, ensure_ascii=False)
+
+
+def test_reply_request_rejects_overlong_input_before_generation(tmp_path, monkeypatch):
+    config, memory, router, _ = setup(tmp_path, monkeypatch)
+    with pytest.raises(HistoryError, match="3000"):
+        build_reply_context(config, tmp_path, memory, "下班了。", reply_request="字" * 3001)
+    assert not router.calls
+
+
 def test_actual_coach_pipeline_keeps_owners_sources_and_one_contact(tmp_path, monkeypatch):
     config, memory, router, _ = setup(tmp_path, monkeypatch)
     archive(memory, [(2, "me", "好呀，周末出去走走"), (1, "peer", "我喜欢看展")])
@@ -172,19 +194,22 @@ def test_gui_mode_question_and_advice_stay_per_contact(tmp_path, monkeypatch):
     window = WeChatWindow(root, tmp_path)
     monkeypatch.setattr("opendate.wechat_gui.messagebox.showerror", lambda *a, **k: pytest.fail(str(a)))
     try:
-        assert len(window.tabs.tabs()) == 7
+        assert len(window.tabs.tabs()) == 6
         window.strategy_vars["mode"].set("分析局面")
         window.strategy_vars["scene"].set("冲突与修复")
         window.put(window.coach_question, "我想处理冷战")
+        window.put(window.reply_request, "希望自然地把话说开")
         window.save_strategy()
         assert window.build_packet()["strategy_settings"]["question"] == "我想处理冷战"
         window.target_var.set("对象乙")
         window.apply_contact()
         assert window.editing_strategy().mode == "reply"
+        assert not window.reply_request.get("1.0", "end").strip()
         assert "对象甲" not in window.coach_advice.get("1.0", "end")
         window.target_var.set("对象甲")
         window.apply_contact()
         assert window.editing_strategy().question == "我想处理冷战"
+        assert window.reply_request.get("1.0", "end").strip() == "希望自然地把话说开"
     finally:
         window.closed = True
         root.destroy()

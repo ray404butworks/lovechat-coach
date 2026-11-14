@@ -135,6 +135,53 @@ def test_explicit_codex_model_is_preserved(monkeypatch, tmp_path):
     assert command[command.index("--model") + 1] == "user-chosen-model"
 
 
+def test_official_http_transport_survives_config_isolation_without_secrets(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text('''
+model_provider = "chatgpt_http"
+model = "do-not-override-explicit-model"
+[model_providers.chatgpt_http]
+name = "Existing configuration"
+base_url = "https://chatgpt.com/backend-api/codex"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+experimental_bearer_token = "DO-NOT-COPY"
+[model_providers.chatgpt_http.http_headers]
+Authorization = "DO-NOT-COPY"
+[mcp_servers.private]
+command = "DO-NOT-COPY"
+''', encoding="utf-8")
+    backend = CodexCLIBackend()
+    monkeypatch.setattr(backend, "executable", lambda: "codex.exe")
+    command = backend.command("my-explicit-model", tmp_path)
+    assert "--ignore-user-config" in command
+    assert 'model_provider="lovechat_chatgpt"' in command
+    assert "model_providers.lovechat_chatgpt.supports_websockets=false" in command
+    assert command[command.index("--model") + 1] == "my-explicit-model"
+    assert "DO-NOT-COPY" not in " ".join(command)
+    assert "do-not-override-explicit-model" not in " ".join(command)
+
+
+@pytest.mark.parametrize("url", ["https://chatgpt.com.evil.example/backend-api/codex",
+                                  "http://chatgpt.com/backend-api/codex",
+                                  "https://chatgpt.com/backend-api/codex?secret=x",
+                                  "https://user:secret@chatgpt.com/backend-api/codex"])
+def test_transport_never_forwards_auth_to_untrusted_endpoint(monkeypatch, tmp_path, url):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        'model_provider="custom"\n[model_providers.custom]\n'
+        f'base_url={json.dumps(url)}\nrequires_openai_auth=true\n', encoding="utf-8")
+    assert CodexCLIBackend.connection_overrides() == []
+
+
+def test_missing_or_invalid_transport_config_keeps_default_cli(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    assert CodexCLIBackend.connection_overrides() == []
+    (tmp_path / "config.toml").write_text("not valid [", encoding="utf-8")
+    assert CodexCLIBackend.connection_overrides() == []
+
+
 def test_prompt_only_goes_through_stdin_and_output_is_temporary(monkeypatch, tmp_path):
     backend = CodexCLIBackend(work_dir=str(tmp_path))
     monkeypatch.setattr(backend, "executable", lambda: "codex.exe")

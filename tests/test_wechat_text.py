@@ -175,14 +175,14 @@ def test_gui_nickname_choices_preview_confirmation_and_txt_binding(tmp_path, mon
 
     try:
         app.load_import(path)
-        mapping, = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
+        mapping, = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel) and w != app.settings_window]
         choices = [w for w in descendants(mapping) if isinstance(w, ttk.Combobox)]
         assert [w.get() for w in choices] == ["", ""]
         choices[0].set("源本人")
         choices[1].set("源好友")
         next(w for w in descendants(mapping) if isinstance(w, ttk.Button)
              and w.cget("text") == "确认对应，继续预览").invoke()
-        preview, = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
+        preview, = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel) and w != app.settings_window]
         shown = "\n".join(w.get("1.0", "end") for w in descendants(preview) if isinstance(w, tk.Text))
         assert "我 1 条，对方 2 条" in shown and "时间范围" in shown
         assert app.memory.stats("对象备注")[0] == 0

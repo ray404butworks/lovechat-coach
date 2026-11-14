@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-14
+
+### Added
+
+- One-stop desktop home for incoming messages, the user's own reply intent, editable suggestions, explanations and copying. Detailed settings remain in a separate window.
+- Controls for local automatic capture of visible incoming text from the selected Windows WeChat conversation, with title checks, explicit window selection, draft preservation and per-message review.
+
+### Fixed
+
+- Prevent long multiline profile and goal summaries from displacing input fields; keep action buttons and consent controls reachable at high DPI with scrollable content.
+- Show generation failures and pause reasons directly on the home page, with a direct analysis action and a distinct save-and-generate control.
+- Preserve the existing official ChatGPT HTTP transport configuration when running an otherwise isolated Codex CLI process, fixing repeated connection timeouts without raising the timeout.
+- Clarify exact evidence quote formatting so speaker labels do not cause otherwise valid generated text to fail source validation.
+
+### Validation
+
+- 388 offline tests passed on Windows/Python 3.13; one native-display check was skipped. A synthetic conversation completed real Codex generation, exact-quote validation and independent review.
+- Verified WeChat window restoration and stopping on a mismatched conversation. Correct-conversation body OCR remains unverified on the actual client; only visible light-theme text bubbles are supported.
+
+## [0.3.0] - 2026-11-07
+
 ### Changed
 
 - Rebuild the WeChat desktop coaching workflow around goutoujunshi's emotion, evidence, decision, one-action composition and feedback architecture.
@@ -64,5 +85,6 @@ Initial public release.
 - Configuration via `config.yaml` + `.env`, with secret redaction in logs.
 - Fully offline `pytest` suite and example posts/chats for persona building.
 
-[Unreleased]: https://github.com/sumitaich1998/OpenDate/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ray404butworks/lovechat-coach/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/ray404butworks/lovechat-coach/releases/tag/v0.3.1
 [0.1.0]: https://github.com/sumitaich1998/OpenDate/releases/tag/v0.1.0

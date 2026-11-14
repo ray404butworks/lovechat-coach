@@ -94,7 +94,7 @@ class NativeTheme:
             element = f"OpenDate{len(self.images)}.border"
             style.element_create(element, "image", images[0], ("disabled", disabled),
                                  ("pressed", images[2]), ("focus", focus), ("active", images[1]),
-                                 border=10, sticky="nsew")
+                                 border=10, padding=0, sticky="nsew")
             style.layout(name, [(element, {"sticky":"nsew", "children":[
                 ("Button.padding", {"sticky":"nsew", "children":[("Button.label", {"sticky":"nsew"})]})]})])
             style.configure(name, padding=(13, 8), font=FONT_STRONG if primary else FONT_BODY,
@@ -153,7 +153,7 @@ class ReplySplit(ttk.Frame):
     """
     def __init__(self, parent):
         super().__init__(parent)
-        self.left, self.right = ttk.Frame(self), ttk.Frame(self)
+        self.left, self.right = ScrollPanel(self), ScrollPanel(self)
         self.handle = ttk.Frame(self, cursor="sb_h_double_arrow", takefocus=True)
         grip = ttk.Separator(self.handle, orient="vertical")
         grip.place(relx=0.5, rely=0.15, relheight=0.7, width=1)
@@ -233,7 +233,8 @@ class ScrollPanel(ttk.Frame):
     """Keep form actions reachable on short / high-DPI desktop viewports."""
     def __init__(self, parent):
         super().__init__(parent)
-        p = parent.winfo_toplevel()._opendate_theme.colors
+        theme = getattr(parent.winfo_toplevel(), "_opendate_theme", None)
+        p = theme.colors if theme else LIGHT
         self.footer = ttk.Frame(self, padding=(16, 8))
         self.footer.pack(side="bottom", fill="x")
         self.canvas = tk.Canvas(self, bg=p["paper"], borderwidth=0, highlightthickness=0)

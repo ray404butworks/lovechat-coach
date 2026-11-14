@@ -11,8 +11,10 @@ import os
 import shutil
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 class CodexCLIError(RuntimeError):
@@ -96,6 +98,50 @@ class CodexCLIBackend:
         ):
             raise CodexCLIError("Codex 尚未使用 ChatGPT 登录；本程序不会改用 API 密钥或自动登录")
 
+    @staticmethod
+    def connection_overrides() -> list[str]:
+        """Keep the user's official ChatGPT transport while isolating other config.
+
+        Ignoring all user config also discards HTTP-only connection workarounds.
+        Only public provider fields for an authenticated official endpoint are
+        carried forward; MCP, hooks, headers and credentials remain excluded.
+        """
+        home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        try:
+            config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        provider_id = config.get("model_provider")
+        if not isinstance(provider_id, str):
+            return []
+        providers = config.get("model_providers", {})
+        if not isinstance(providers, dict):
+            return []
+        provider = providers.get(provider_id)
+        if not isinstance(provider, dict) or provider.get("requires_openai_auth") is not True:
+            return []
+        base_url = provider.get("base_url")
+        if not isinstance(base_url, str):
+            return []
+        try:
+            url = urlsplit(base_url)
+            trusted = (url.scheme == "https" and url.hostname in {"chatgpt.com", "chat.openai.com"}
+                       and url.path.rstrip("/") == "/backend-api/codex" and url.port in {None, 443}
+                       and not any((url.username, url.password, url.query, url.fragment)))
+        except ValueError:
+            return []
+        if not trusted or provider.get("wire_api", "responses") != "responses":
+            return []
+        # Use a private fixed identifier so config key syntax cannot be injected.
+        fields = {"name": "OpenAI (ChatGPT)", "base_url": base_url, "wire_api": "responses",
+                  "requires_openai_auth": True}
+        if isinstance(provider.get("supports_websockets"), bool):
+            fields["supports_websockets"] = provider["supports_websockets"]
+        overrides = ['model_provider="lovechat_chatgpt"']
+        overrides.extend(f"model_providers.lovechat_chatgpt.{key}={json.dumps(value)}"
+                         for key, value in fields.items())
+        return overrides
+
     def command(self, model: str, directory: Path) -> list[str]:
         command = [
             self.executable(),
@@ -143,6 +189,8 @@ class CodexCLIBackend:
             "mcp_servers={}",
             "features.skip_host_skill_discovery=true",
         ):
+            command.extend(["-c", override])
+        for override in self.connection_overrides():
             command.extend(["-c", override])
         if model and model != "default":
             command.extend(["--model", model])
